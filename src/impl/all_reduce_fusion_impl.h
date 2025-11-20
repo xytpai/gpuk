@@ -165,6 +165,11 @@ struct LamportComm {
 
 } // namespace comm
 
+enum QuantType {
+    NONE = 0,
+    FP8,
+};
+
 template <typename T>
 struct AllReduceFusionParams {
     int nranks;
@@ -178,12 +183,24 @@ struct AllReduceFusionParams {
     void *norm_out;
     void *rms_gamma;
     float rms_eps;
+    // per token quant
+    QuantType quant_type;
+    void *scale_out;
 };
 
 template <typename T, int VEC_SIZE>
-__device__ __forceinline__ vec_t<T, VEC_SIZE>
-rms_norm(AllReduceFusionParams<T> const &m_params,
-         vec_t<T, VEC_SIZE> const &residual, vec_t<T, VEC_SIZE> const &gamma) {
+__device__ __forceinline__ vec_t<gpu_fp8, VEC_SIZE> convert_to_fp8(vec_t<T, VEC_SIZE> &in_vec, float scale) {
+    vec_t<gpu_fp8, VEC_SIZE> out_vec;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+        out_vec[i] = static_cast<gpu_fp8>((float)in_vec[i] / scale);
+    }
+    return out_vec;
+}
+
+template <typename T, int VEC_SIZE>
+__device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(AllReduceFusionParams<T> const &m_params,
+                                                       vec_t<T, VEC_SIZE> const &residual, vec_t<T, VEC_SIZE> const &gamma) {
     __shared__ float s_val;
     vec_t<T, VEC_SIZE> norm_out;
     float acc = 0.f;
@@ -205,9 +222,27 @@ rms_norm(AllReduceFusionParams<T> const &m_params,
     return norm_out;
 }
 
+template <typename T, int VEC_SIZE>
+__device__ __forceinline__ float reduce_abs_max(vec_t<T, VEC_SIZE> const &data) {
+    __shared__ float s_val;
+    auto fn = [](float a, float b) { return a > b ? a : b; };
+    float acc = -1.f;
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+        float v = static_cast<float>(reinterpret_cast<T const *>(&data)[i]);
+        acc = fn(acc, std::abs(v));
+    }
+    acc = block_reduce<float>(acc, fn);
+    if (threadIdx.x == 0) {
+        s_val = acc;
+    }
+    __syncthreads();
+    acc = s_val;
+    return acc;
+}
+
 template <typename T, int NRanks>
-__global__ void
-allreduce_fusion_kernel_twoshot_direct(AllReduceFusionParams<T> params) {
+__global__ void allreduce_fusion_kernel_twoshot_direct(AllReduceFusionParams<T> params) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
 
     int access_id_in_token = threadIdx.x * VEC_SIZE;
@@ -252,15 +287,24 @@ allreduce_fusion_kernel_twoshot_direct(AllReduceFusionParams<T> params) {
 #pragma unroll
     for (int r = 0; r < NRanks; ++r) {
         int token_id = blockIdx.x * NRanks + r;
-        for (int idx = token_id * params.hidden_dim + access_id_in_token;
-             idx < params.size; idx += gridDim.x * NRanks * params.hidden_dim) {
+        for (int idx = token_id * params.hidden_dim + access_id_in_token, tidx = token_id;
+             idx < params.size; idx += gridDim.x * NRanks * params.hidden_dim, tidx += gridDim.x * NRanks) {
             vec_t<T, VEC_SIZE> data[2];
             data[0].load(reinterpret_cast<T *>(params.residual_in) + idx);
             data[1].load(reinterpret_cast<T *>(comm.comm_bufs[params.rank]) + params.size + idx);
             vec_add_<T, VEC_SIZE>(data[0], data[1]);
             data[0].store(reinterpret_cast<T *>(params.residual_out) + idx);
             auto val = rms_norm<T, VEC_SIZE>(params, data[0], gamma);
-            val.store(reinterpret_cast<T *>(params.norm_out) + idx);
+            if (params.quant_type == QuantType::FP8) {
+                float scale = reduce_abs_max<T, VEC_SIZE>(val);
+                scale = scale == 0.f ? 1.f : scale / details::FP8_E4M3_MAX;
+                auto val_fp8 = convert_to_fp8<T, VEC_SIZE>(val, scale);
+                val_fp8.store(reinterpret_cast<gpu_fp8 *>(params.norm_out) + idx);
+                if (threadIdx.x == 0)
+                    reinterpret_cast<float *>(params.scale_out)[tidx] = scale;
+            } else {
+                val.store(reinterpret_cast<T *>(params.norm_out) + idx);
+            }
         }
     }
 
@@ -268,8 +312,7 @@ allreduce_fusion_kernel_twoshot_direct(AllReduceFusionParams<T> params) {
 }
 
 template <typename T, int NRanks>
-__global__ void
-allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams<T> params) {
+__global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams<T> params) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     int token_id = blockIdx.x;
     int access_id_in_token = threadIdx.x * VEC_SIZE;
@@ -322,7 +365,16 @@ allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams<T> params) {
         vec_add_<T, VEC_SIZE>(vals[0], residual);
         vals[0].store(reinterpret_cast<T *>(params.residual_out) + idx);
         auto val = rms_norm<T, VEC_SIZE>(params, vals[0], gamma);
-        val.store(reinterpret_cast<T *>(params.norm_out) + idx);
+        if (params.quant_type == QuantType::FP8) {
+            float scale = reduce_abs_max<T, VEC_SIZE>(val);
+            scale = scale == 0.f ? 1.f : scale / details::FP8_E4M3_MAX;
+            auto val_fp8 = convert_to_fp8<T, VEC_SIZE>(val, scale);
+            val_fp8.store(reinterpret_cast<gpu_fp8 *>(params.norm_out) + idx);
+            if (threadIdx.x == 0)
+                reinterpret_cast<float *>(params.scale_out)[tidx] = scale;
+        } else {
+            val.store(reinterpret_cast<T *>(params.norm_out) + idx);
+        }
     }
 
     comm.update(params.size * NRanks);
@@ -364,6 +416,7 @@ void allreduce_rms_fusion_impl(void **workspace, int rank, int nranks, int size,
                                int hidden_dim, void *allreduce_in,
                                void *residual_in, void *residual_out,
                                void *norm_out, void *rms_gamma, float eps,
+                               int quant_type = 0, void *scale_out = nullptr,
                                gpuStream_t stream = 0) {
     AllReduceFusionParams<T> params;
     params.nranks = nranks;
@@ -377,6 +430,8 @@ void allreduce_rms_fusion_impl(void **workspace, int rank, int nranks, int size,
     params.norm_out = norm_out;
     params.rms_gamma = rms_gamma;
     params.rms_eps = eps;
+    params.scale_out = scale_out;
+    params.quant_type = (QuantType)quant_type;
     if (nranks == 8) {
         allreduce_fusion_kernel_launcher<T, 8>(params, stream);
     } else if (nranks == 4) {

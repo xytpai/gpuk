@@ -13,7 +13,7 @@ TORCH_LIBRARY(gpuk, m) {
     m.def("get_ar_fusion_workspace(SymInt fptr, Tensor ref) -> Tensor");
     m.def("allreduce_rms(SymInt rank, SymInt nranks, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
-          "norm_out, float eps, Tensor workspace) -> ()");
+          "norm_out, Tensor scale_out, float eps, SymInt quant_type, Tensor workspace) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {

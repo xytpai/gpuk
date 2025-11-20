@@ -120,5 +120,6 @@
 #endif
 
 #include "communicator.h"
+#include "float8.h"
 #include "kernel_utils.h"
 #include "negzero.h"

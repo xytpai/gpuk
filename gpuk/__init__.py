@@ -22,6 +22,9 @@ get_ar_fusion_workspace = eval(f"{prefix}.get_ar_fusion_workspace")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 
 
+fp8 = torch.float8_e4m3fn
+
+
 class ARFusion:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
 
@@ -83,7 +86,7 @@ class DistributedEnv:
         torch.cuda.synchronize()
 
     def allreduce_add_rms_native(
-        self, allreduce_in, residual_in, rms_weight, eps
+        self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
     ):
         def rms_norm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float):
             input_dtype = x.dtype
@@ -94,13 +97,29 @@ class DistributedEnv:
         dist.all_reduce(allreduce_in)
         residual_out = allreduce_in + residual_in
         norm_out = rms_norm_forward(residual_out, rms_weight, eps)
-        return residual_out, norm_out
+        if fp8_out:
+            norm_out_scale, _ = norm_out.float().abs().max(dim=-1, keepdim=True)
+            norm_out_scale = norm_out_scale / 240
+            norm_out = (norm_out / norm_out_scale).to(fp8)
+            return residual_out, norm_out, norm_out_scale
+        else:
+            return residual_out, norm_out
 
     def allreduce_add_rms_fused(
-        self, allreduce_in, residual_in, rms_weight, eps
+        self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
     ):
         residual_out = torch.empty_like(residual_in)
         norm_out = torch.empty_like(allreduce_in)
+        if fp8_out:
+            norm_out = norm_out.to(fp8)
+            scale_out = torch.empty(
+                allreduce_in.shape[0],
+                1,
+                dtype=torch.float32,
+                device=allreduce_in.device,
+            )
+        else:
+            scale_out = torch.empty(1, dtype=torch.float32, device=allreduce_in.device)
         allreduce_rms(
             self.rank,
             self.world_size,
@@ -109,7 +128,12 @@ class DistributedEnv:
             rms_weight,
             residual_out,
             norm_out,
+            scale_out,
             eps,
+            1 if fp8_out else 0,
             self.ar_fusion.get_workspace(allreduce_in),
         )
-        return residual_out, norm_out
+        if fp8_out:
+            return residual_out, norm_out, scale_out
+        else:
+            return residual_out, norm_out

@@ -195,7 +195,8 @@ struct KernelElementType<c10::BFloat16> {
 #endif
 
 void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &residual_in,
-                   Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, double eps, Tensor &workspace) {
+                   Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
+                   double eps, int64_t quant_type, Tensor &workspace) {
     auto dev = allreduce_in.device();
     c10::DeviceGuard dev_guard(dev);
 #ifdef __CUDACC__
@@ -222,6 +223,8 @@ void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &r
                 (void *)norm_out.data_ptr(),
                 (void *)rms_gamma.data_ptr<scalar_t>(),
                 eps,
+                quant_type,
+                (void *)scale_out.data_ptr<float>(),
                 stream);
         });
 }
