@@ -258,7 +258,7 @@ void runbench(int nranks, int size, int hidden_dim, float eps = 1e-6,
 
     for (int rank = 0; rank < nranks; ++rank) {
         gpuSetDevice(rank);
-        allreduce_fusion::allreduce_rms_fusion_impl<float>(
+        allreduce_rms_fusion_impl<float>(
             workspaces[rank].workspace(), rank, nranks, size, hidden_dim,
             gpu_inputs[rank].allreduce_in, gpu_inputs[rank].residual_in,
             gpu_inputs[rank].residual_out, gpu_inputs[rank].norm_out,

@@ -1,91 +1,135 @@
 import os
+import time
 import torch
-import torch.nn as nn
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
-import torch_dist_ext
+import gpuk
 
 
-envs = {  
-    "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
-}
-for k,v in envs.items():
-    os.environ[k] = v
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, norm_eps=1e-6, dtype=torch.float):
-        super().__init__()
-        self.eps = norm_eps
-        self.weight = nn.Parameter(torch.randn(dim, dtype=dtype), requires_grad=False)
-
-    def forward(self, x):
-        input_dtype = x.dtype
-        variance = x.float().pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        x = x.to(input_dtype)
-        return self.weight * x
-
-
-def setup(rank, world_size):
-    torch.cuda.set_device(rank)
-    dist.init_process_group(
-        backend='nccl',
-        init_method='tcp://127.0.0.1:23459',
-        rank=rank,
-        world_size=world_size)
-
-
-def worker(rank, world_size, allreduce_in, residual_in, rms, ref_residual_out, ref_norm_out, eps, use_fused=True):
-    setup(rank, world_size)
-    torch_dist_ext.setup_env(rank, world_size)
-    num_tokens, hidden_dim = residual_in.shape
-    local_allreduce_in = allreduce_in[rank].cuda(rank)
-    local_residual_in = residual_in.cuda(rank)
-    local_rms = rms.cuda(rank)
-    workspace = torch_dist_ext.get_workspace(local_allreduce_in)
-    torch.cuda.synchronize()
-    dist.barrier()
-    prof = torch.profiler.profile(
+def worker(
+    rank, world_size, allreduce_in_, residual_in_, rms_weight_, eps, show_profile=False
+):
+    dist_env = gpuk.DistributedEnv(rank, world_size)
+    for i in range(len(allreduce_in_)):
+        local_allreduce_in = allreduce_in_[i][rank].cuda(rank)
+        local_residual_in = residual_in_[i].cuda(rank)
+        local_rms_weight = rms_weight_[i].cuda(rank)
+        num_tokens, hidden_dim = local_allreduce_in.shape
+        prof = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
-            ])
-    with prof:
-        if not use_fused:
-            dist.all_reduce(local_allreduce_in)    
-            local_norm_out = local_rms(local_allreduce_in + local_residual_in)
-        else:
-            local_norm_out, local_residual_out = torch_dist_ext.allreduce_rms(rank, world_size, local_allreduce_in, local_residual_in, 
-                local_rms.weight.data, eps, workspace)
-    maxdiff = (local_norm_out.cpu() - ref_norm_out).abs().max()
-    print(f"rank:{rank}, maxdiff:{maxdiff}")
-    # assert torch.allclose(local_norm_out.cpu(), ref_norm_out)
-    if rank == 0:
-        print(prof.key_averages().table(sort_by='cuda_time_total', row_limit=10000))
-    dist.destroy_process_group()
+            ]
+        )
+        with prof:
+            dist_env.barrier()
+            start_native = time.time()
+            ref_residual_out, ref_norm_out = (
+                dist_env.allreduce_add_rms_native(
+                    local_allreduce_in.clone(),
+                    local_residual_in,
+                    local_rms_weight,
+                    eps,
+                )
+            )
+            dist_env.barrier()
+            start_fused = time.time()
+            residual_out, norm_out = dist_env.allreduce_add_rms_fused(
+                local_allreduce_in.clone(),
+                local_residual_in,
+                local_rms_weight,
+                eps,
+            )
+            dist_env.barrier()
+            end = time.time()
+        dur_native = start_fused - start_native
+        dur_fused = end - start_fused
+        speedup = dur_native / dur_fused
+        print(f"dur_native:{dur_native}, dur_fused:{dur_fused}, speedup:{speedup}")
+        if rank == 0 and show_profile:
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10000))
+        residual_out_maxdiff = (residual_out.cpu().float() - ref_residual_out.cpu().float()).abs().max()
+        norm_out_maxdiff = (norm_out.cpu().float() - ref_norm_out.cpu().float()).abs().max()
+        print(f"rank:{rank}, residual_out_maxdiff:{residual_out_maxdiff}, norm_out_maxdiff:{norm_out_maxdiff}")
 
 
-def main():
-    def testcase(world_size=4, num_tokens=128, hidden_dim=1024, eps=1e-6, dtype=torch.float):
-        allreduce_in = torch.randn(world_size, num_tokens, hidden_dim, dtype=dtype)
-        residual_in = torch.randn(num_tokens, hidden_dim, dtype=dtype)
-        rms = RMSNorm(hidden_dim, dtype=dtype)
-        ref_residual_out = allreduce_in.sum(dim=0) + residual_in
-        ref_norm_out = rms(ref_residual_out)
-        mp.spawn(worker, args=(world_size, allreduce_in, residual_in, rms, ref_residual_out, ref_norm_out, eps), nprocs=world_size, join=True)
+def testcase(
+    world_size=4,
+    num_tokens=128,
+    hidden_dim=1024,
+    eps=1e-6,
+    dtype=torch.float,
+    nsamples=5,
+):
+    print(
+        f"\n============ world_size:{world_size}, num_tokens:{num_tokens}, hidden_dim:{hidden_dim}, eps:{eps}, dtype:{dtype}, nsamples:{nsamples} ============\n"
+    )
+    allreduce_in_ = []
+    residual_in_ = []
+    rms_weight_ = []
+    for i in range(nsamples):
+        allreduce_in_.append(
+            torch.randn(world_size, num_tokens, hidden_dim, dtype=dtype).uniform_(-1, 1)
+        )
+        residual_in_.append(
+            torch.randn(num_tokens, hidden_dim, dtype=dtype).uniform_(-1, 1)
+        )
+        rms_weight_.append(torch.randn(hidden_dim, dtype=dtype).uniform_(-1, 1))
+    mp.spawn(
+        worker,
+        args=(
+            world_size,
+            allreduce_in_,
+            residual_in_,
+            rms_weight_,
+            eps,
+        ),
+        nprocs=world_size,
+        join=True,
+    )
+
+
+def main(world_size=4):
+    num_tokens = 1
+    testcase(
+        world_size=world_size,
+        num_tokens=num_tokens,
+        hidden_dim=4096,
+        dtype=torch.bfloat16,
+    )
+
     num_tokens = 129
-    testcase(num_tokens=num_tokens, dtype=torch.float)
-    testcase(num_tokens=num_tokens, dtype=torch.float)
-    testcase(num_tokens=num_tokens, dtype=torch.bfloat16)
-    testcase(num_tokens=num_tokens, dtype=torch.half)
+    testcase(
+        world_size=world_size, num_tokens=num_tokens, hidden_dim=1024, dtype=torch.float
+    )
+    testcase(
+        world_size=world_size,
+        num_tokens=num_tokens,
+        hidden_dim=1024,
+        dtype=torch.bfloat16,
+    )
+    testcase(
+        world_size=world_size, num_tokens=num_tokens, hidden_dim=1024, dtype=torch.half
+    )
+
     num_tokens = 128
-    testcase(num_tokens=num_tokens, dtype=torch.float)
-    testcase(num_tokens=num_tokens, dtype=torch.float)
-    testcase(num_tokens=num_tokens, dtype=torch.bfloat16)
-    testcase(num_tokens=num_tokens, dtype=torch.half)
+    testcase(
+        world_size=world_size, num_tokens=num_tokens, hidden_dim=1024, dtype=torch.float
+    )
+    testcase(
+        world_size=world_size, num_tokens=num_tokens, hidden_dim=1024, dtype=torch.half
+    )
+    testcase(
+        world_size=world_size,
+        num_tokens=num_tokens,
+        hidden_dim=1024,
+        dtype=torch.bfloat16,
+    )
+
+    testcase(
+        world_size=world_size, num_tokens=32768, hidden_dim=4096, dtype=torch.bfloat16
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

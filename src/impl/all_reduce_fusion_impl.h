@@ -8,8 +8,6 @@ namespace cg = cooperative_groups;
 
 #define NBLOCKS_PER_GPU 256
 
-namespace allreduce_fusion {
-
 namespace details {
 
 static constexpr int kBytesPerAccess = 16;
@@ -367,7 +365,7 @@ void allreduce_rms_fusion_impl(void **workspace, int rank, int nranks, int size,
                                void *residual_in, void *residual_out,
                                void *norm_out, void *rms_gamma, float eps,
                                gpuStream_t stream = 0) {
-    allreduce_fusion::AllReduceFusionParams<T> params;
+    AllReduceFusionParams<T> params;
     params.nranks = nranks;
     params.rank = rank;
     params.size = size;
@@ -389,5 +387,3 @@ void allreduce_rms_fusion_impl(void **workspace, int rank, int nranks, int size,
         assert(false);
     }
 }
-
-} // namespace allreduce_fusion
