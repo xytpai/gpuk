@@ -75,12 +75,12 @@ def testcase(
     rms_weight_ = []
     for i in range(nsamples):
         allreduce_in_.append(
-            torch.randn(world_size, num_tokens, hidden_dim, dtype=dtype).uniform_(-1, 1)
+            torch.randn(world_size, num_tokens, hidden_dim, dtype=dtype, device='cuda').uniform_(-1, 1).cpu()
         )
         residual_in_.append(
-            torch.randn(num_tokens, hidden_dim, dtype=dtype).uniform_(-1, 1)
+            torch.randn(num_tokens, hidden_dim, dtype=dtype, device='cuda').uniform_(-1, 1).cpu()
         )
-        rms_weight_.append(torch.randn(hidden_dim, dtype=dtype).uniform_(-2/hidden_dim, 2/hidden_dim))
+        rms_weight_.append(torch.randn(hidden_dim, dtype=dtype, device='cuda').uniform_(-2/hidden_dim, 2/hidden_dim).cpu())
     mp.spawn(
         worker,
         args=(
