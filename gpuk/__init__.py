@@ -76,7 +76,7 @@ class ARFusion:
 
 
 class DistributedEnv:
-    def __init__(self, rank, world_size, port=22239):
+    def __init__(self, rank, world_size, port=22339):
         torch.cuda.set_device(rank)
         dist.init_process_group(
             backend="nccl",
@@ -118,7 +118,13 @@ class DistributedEnv:
             norm_out = norm_out.to(fp8)
             return residual_out, norm_out, norm_out_scale
         else:
-            return residual_out, norm_out
+            scale_out = torch.empty(
+                allreduce_in.shape[0],
+                1,
+                dtype=torch.float32,
+                device=allreduce_in.device,
+            )
+            return residual_out, norm_out, scale_out
 
     def allreduce_add_rms_fused(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
@@ -151,4 +157,4 @@ class DistributedEnv:
         if fp8_out:
             return residual_out, norm_out, scale_out
         else:
-            return residual_out, norm_out
+            return residual_out, norm_out, scale_out

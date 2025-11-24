@@ -193,16 +193,17 @@ __device__ __forceinline__ vec_t<QuantT, VEC_SIZE> convert_to_fp8(vec_t<T, VEC_S
     vec_t<QuantT, VEC_SIZE> out_vec;
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
-        out_vec[i] = static_cast<QuantT>(static_cast<float>(in_vec[i]) / scale);
+        volatile float out = static_cast<float>(in_vec[i]) / scale;
+        out_vec[i] = static_cast<QuantT>(out);
     }
     return out_vec;
 }
 
-template <typename T, int VEC_SIZE>
-__device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(AllReduceFusionParams<T> const &m_params,
-                                                       vec_t<T, VEC_SIZE> const &residual, vec_t<T, VEC_SIZE> const &gamma) {
+template <typename T, int VEC_SIZE, typename OutT>
+__device__ __forceinline__ vec_t<OutT, VEC_SIZE> rms_norm(AllReduceFusionParams<T> const &m_params,
+                                                          vec_t<T, VEC_SIZE> const &residual, vec_t<T, VEC_SIZE> const &gamma) {
     __shared__ float s_val;
-    vec_t<T, VEC_SIZE> norm_out;
+    vec_t<OutT, VEC_SIZE> norm_out;
     float acc = 0.f;
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
@@ -216,8 +217,8 @@ __device__ __forceinline__ vec_t<T, VEC_SIZE> rms_norm(AllReduceFusionParams<T> 
     __syncthreads();
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
-        reinterpret_cast<T *>(&norm_out)[i] = static_cast<T>(
-            static_cast<float>(reinterpret_cast<T const *>(&residual)[i]) * s_val * static_cast<float>(reinterpret_cast<T const *>(&gamma)[i]));
+        float out = static_cast<float>(reinterpret_cast<T const *>(&residual)[i]) * s_val * static_cast<float>(reinterpret_cast<T const *>(&gamma)[i]);
+        norm_out[i] = static_cast<OutT>(out);
     }
     return norm_out;
 }
@@ -294,22 +295,23 @@ __global__ void allreduce_fusion_kernel_twoshot_direct(AllReduceFusionParams<T> 
             data[1].load(reinterpret_cast<T *>(comm.comm_bufs[params.rank]) + params.size + idx);
             vec_add_<T, VEC_SIZE>(data[0], data[1]);
             data[0].store(reinterpret_cast<T *>(params.residual_out) + idx);
-            auto val = rms_norm<T, VEC_SIZE>(params, data[0], gamma);
-            if (params.quant_type != QuantType::NONE) {
-                float scale = reduce_abs_max<T, VEC_SIZE>(val);
+            if (params.quant_type == QuantType::NONE) {
+                auto val = rms_norm<T, VEC_SIZE, T>(params, data[0], gamma);
+                val.store(reinterpret_cast<T *>(params.norm_out) + idx);
+            } else {
+                auto val = rms_norm<T, VEC_SIZE, float>(params, data[0], gamma);
+                float scale = reduce_abs_max<float, VEC_SIZE>(val);
                 if (params.quant_type == QuantType::FP8E4M3FN) {
                     scale = scale == 0.f ? 1.f : scale / fp8e4m3fn::max_value;
-                    auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fn>(val, scale);
+                    auto val_fp8 = convert_to_fp8<float, VEC_SIZE, fp8e4m3fn>(val, scale);
                     val_fp8.store(reinterpret_cast<fp8e4m3fn *>(params.norm_out) + idx);
                 } else {
                     scale = scale == 0.f ? 1.f : scale / fp8e4m3fnuz::max_value;
-                    auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fnuz>(val, scale);
+                    auto val_fp8 = convert_to_fp8<float, VEC_SIZE, fp8e4m3fnuz>(val, scale);
                     val_fp8.store(reinterpret_cast<fp8e4m3fnuz *>(params.norm_out) + idx);
                 }
                 if (threadIdx.x == 0)
                     reinterpret_cast<float *>(params.scale_out)[tidx] = scale;
-            } else {
-                val.store(reinterpret_cast<T *>(params.norm_out) + idx);
             }
         }
     }
@@ -370,22 +372,23 @@ __global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams<T>
         vec_add_r_<T, VEC_SIZE, NRanks>(vals);
         vec_add_<T, VEC_SIZE>(vals[0], residual);
         vals[0].store(reinterpret_cast<T *>(params.residual_out) + idx);
-        auto val = rms_norm<T, VEC_SIZE>(params, vals[0], gamma);
-        if (params.quant_type != QuantType::NONE) {
-            float scale = reduce_abs_max<T, VEC_SIZE>(val);
+        if (params.quant_type == QuantType::NONE) {
+            auto val = rms_norm<T, VEC_SIZE, T>(params, vals[0], gamma);
+            val.store(reinterpret_cast<T *>(params.norm_out) + idx);
+        } else {
+            auto val = rms_norm<T, VEC_SIZE, float>(params, vals[0], gamma);
+            float scale = reduce_abs_max<float, VEC_SIZE>(val);
             if (params.quant_type == QuantType::FP8E4M3FN) {
                 scale = scale == 0.f ? 1.f : scale / fp8e4m3fn::max_value;
-                auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fn>(val, scale);
+                auto val_fp8 = convert_to_fp8<float, VEC_SIZE, fp8e4m3fn>(val, scale);
                 val_fp8.store(reinterpret_cast<fp8e4m3fn *>(params.norm_out) + idx);
             } else {
                 scale = scale == 0.f ? 1.f : scale / fp8e4m3fnuz::max_value;
-                auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fnuz>(val, scale);
+                auto val_fp8 = convert_to_fp8<float, VEC_SIZE, fp8e4m3fnuz>(val, scale);
                 val_fp8.store(reinterpret_cast<fp8e4m3fnuz *>(params.norm_out) + idx);
             }
             if (threadIdx.x == 0)
                 reinterpret_cast<float *>(params.scale_out)[tidx] = scale;
-        } else {
-            val.store(reinterpret_cast<T *>(params.norm_out) + idx);
         }
     }
 

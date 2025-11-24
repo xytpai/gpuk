@@ -60,7 +60,7 @@ def worker(
 
 
 def testcase(
-    world_size=4,
+    world_size=8,
     num_tokens=128,
     hidden_dim=1024,
     eps=1e-6,
@@ -80,7 +80,7 @@ def testcase(
         residual_in_.append(
             torch.randn(num_tokens, hidden_dim, dtype=dtype).uniform_(-1, 1)
         )
-        rms_weight_.append(torch.randn(hidden_dim, dtype=dtype).uniform_(-1, 1))
+        rms_weight_.append(torch.randn(hidden_dim, dtype=dtype).uniform_(-2/hidden_dim, 2/hidden_dim))
     mp.spawn(
         worker,
         args=(
