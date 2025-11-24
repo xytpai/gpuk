@@ -22,7 +22,20 @@ get_ar_fusion_workspace = eval(f"{prefix}.get_ar_fusion_workspace")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 
 
-fp8 = torch.float8_e4m3fn
+fp8 = torch.float8_e4m3fnuz
+# fp8 = torch.float8_e4m3fn
+
+
+fp8_max_val_ = {
+    torch.float8_e4m3fn: 240,
+    torch.float8_e4m3fnuz: 120,
+}
+fp8_max_val = fp8_max_val_[fp8]
+fp8_policy_id_ = {
+    torch.float8_e4m3fn: 1,
+    torch.float8_e4m3fnuz: 2,
+}
+fp8_policy_id = fp8_policy_id_[fp8]
 
 
 class ARFusion:
@@ -63,11 +76,11 @@ class ARFusion:
 
 
 class DistributedEnv:
-    def __init__(self, rank, world_size):
+    def __init__(self, rank, world_size, port=22239):
         torch.cuda.set_device(rank)
         dist.init_process_group(
             backend="nccl",
-            init_method="tcp://127.0.0.1:22229",
+            init_method=f"tcp://127.0.0.1:{port}",
             rank=rank,
             world_size=world_size,
         )
@@ -99,8 +112,10 @@ class DistributedEnv:
         norm_out = rms_norm_forward(residual_out, rms_weight, eps)
         if fp8_out:
             norm_out_scale, _ = norm_out.float().abs().max(dim=-1, keepdim=True)
-            norm_out_scale = norm_out_scale / 240
-            norm_out = (norm_out / norm_out_scale).to(fp8)
+            norm_out_scale = norm_out_scale / fp8_max_val
+            norm_out = norm_out / norm_out_scale
+            norm_out.clamp_(min=-fp8_max_val, max=fp8_max_val)
+            norm_out = norm_out.to(fp8)
             return residual_out, norm_out, norm_out_scale
         else:
             return residual_out, norm_out
@@ -130,7 +145,7 @@ class DistributedEnv:
             norm_out,
             scale_out,
             eps,
-            1 if fp8_out else 0,
+            fp8_policy_id if fp8_out else 0,
             self.ar_fusion.get_workspace(allreduce_in),
         )
         if fp8_out:

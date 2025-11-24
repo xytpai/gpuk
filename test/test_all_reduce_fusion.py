@@ -24,21 +24,23 @@ def worker(
         with prof:
             dist_env.barrier()
             start_native = time.time()
-            ref_residual_out, ref_norm_out = (
+            ref_residual_out, ref_norm_out, ref_scale_out = (
                 dist_env.allreduce_add_rms_native(
                     local_allreduce_in.clone(),
                     local_residual_in,
                     local_rms_weight,
                     eps,
+                    True,
                 )
             )
             dist_env.barrier()
             start_fused = time.time()
-            residual_out, norm_out = dist_env.allreduce_add_rms_fused(
+            residual_out, norm_out, scale_out = dist_env.allreduce_add_rms_fused(
                 local_allreduce_in.clone(),
                 local_residual_in,
                 local_rms_weight,
                 eps,
+                True,
             )
             dist_env.barrier()
             end = time.time()
@@ -48,9 +50,13 @@ def worker(
         print(f"dur_native:{dur_native}, dur_fused:{dur_fused}, speedup:{speedup}")
         if rank == 0 and show_profile:
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10000))
+        ref_norm_out = ref_norm_out.float() * ref_scale_out
+        norm_out = norm_out.float() * scale_out
         residual_out_maxdiff = (residual_out.cpu().float() - ref_residual_out.cpu().float()).abs().max()
         norm_out_maxdiff = (norm_out.cpu().float() - ref_norm_out.cpu().float()).abs().max()
-        print(f"rank:{rank}, residual_out_maxdiff:{residual_out_maxdiff}, norm_out_maxdiff:{norm_out_maxdiff}")
+        scale_out_maxdiff = (scale_out.cpu().float() - ref_scale_out.cpu().float()).abs().max()
+        # print(f"ref_norm_out:{ref_norm_out.float().cpu()}, norm_out:{norm_out.float().cpu()}")
+        print(f"rank:{rank}, residual_out_maxdiff:{residual_out_maxdiff}, norm_out_maxdiff:{norm_out_maxdiff}, scale_out_maxdiff:{scale_out_maxdiff}")
 
 
 def testcase(

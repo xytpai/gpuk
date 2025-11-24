@@ -14,7 +14,6 @@ static constexpr int kBytesPerAccess = 16;
 static constexpr int kOneShotMaxToken = 128;
 static constexpr int kOneShotMaxSize =
     kOneShotMaxToken * 1024 * kBytesPerAccess;
-static constexpr float FP8_E4M3_MAX = 240;
 
 } // namespace details
 
@@ -167,7 +166,8 @@ struct LamportComm {
 
 enum QuantType {
     NONE = 0,
-    FP8,
+    FP8E4M3FN = 1,
+    FP8E4M3FNUZ = 2,
 };
 
 template <typename T>
@@ -188,12 +188,12 @@ struct AllReduceFusionParams {
     void *scale_out;
 };
 
-template <typename T, int VEC_SIZE>
-__device__ __forceinline__ vec_t<gpu_fp8, VEC_SIZE> convert_to_fp8(vec_t<T, VEC_SIZE> &in_vec, float scale) {
-    vec_t<gpu_fp8, VEC_SIZE> out_vec;
+template <typename T, int VEC_SIZE, typename QuantT>
+__device__ __forceinline__ vec_t<QuantT, VEC_SIZE> convert_to_fp8(vec_t<T, VEC_SIZE> &in_vec, float scale) {
+    vec_t<QuantT, VEC_SIZE> out_vec;
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
-        out_vec[i] = static_cast<gpu_fp8>((float)in_vec[i] / scale);
+        out_vec[i] = static_cast<QuantT>(static_cast<float>(in_vec[i]) / scale);
     }
     return out_vec;
 }
@@ -295,11 +295,17 @@ __global__ void allreduce_fusion_kernel_twoshot_direct(AllReduceFusionParams<T> 
             vec_add_<T, VEC_SIZE>(data[0], data[1]);
             data[0].store(reinterpret_cast<T *>(params.residual_out) + idx);
             auto val = rms_norm<T, VEC_SIZE>(params, data[0], gamma);
-            if (params.quant_type == QuantType::FP8) {
+            if (params.quant_type != QuantType::NONE) {
                 float scale = reduce_abs_max<T, VEC_SIZE>(val);
-                scale = scale == 0.f ? 1.f : scale / details::FP8_E4M3_MAX;
-                auto val_fp8 = convert_to_fp8<T, VEC_SIZE>(val, scale);
-                val_fp8.store(reinterpret_cast<gpu_fp8 *>(params.norm_out) + idx);
+                if (params.quant_type == QuantType::FP8E4M3FN) {
+                    scale = scale == 0.f ? 1.f : scale / fp8e4m3fn::max_value;
+                    auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fn>(val, scale);
+                    val_fp8.store(reinterpret_cast<fp8e4m3fn *>(params.norm_out) + idx);
+                } else {
+                    scale = scale == 0.f ? 1.f : scale / fp8e4m3fnuz::max_value;
+                    auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fnuz>(val, scale);
+                    val_fp8.store(reinterpret_cast<fp8e4m3fnuz *>(params.norm_out) + idx);
+                }
                 if (threadIdx.x == 0)
                     reinterpret_cast<float *>(params.scale_out)[tidx] = scale;
             } else {
@@ -365,11 +371,17 @@ __global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams<T>
         vec_add_<T, VEC_SIZE>(vals[0], residual);
         vals[0].store(reinterpret_cast<T *>(params.residual_out) + idx);
         auto val = rms_norm<T, VEC_SIZE>(params, vals[0], gamma);
-        if (params.quant_type == QuantType::FP8) {
+        if (params.quant_type != QuantType::NONE) {
             float scale = reduce_abs_max<T, VEC_SIZE>(val);
-            scale = scale == 0.f ? 1.f : scale / details::FP8_E4M3_MAX;
-            auto val_fp8 = convert_to_fp8<T, VEC_SIZE>(val, scale);
-            val_fp8.store(reinterpret_cast<gpu_fp8 *>(params.norm_out) + idx);
+            if (params.quant_type == QuantType::FP8E4M3FN) {
+                scale = scale == 0.f ? 1.f : scale / fp8e4m3fn::max_value;
+                auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fn>(val, scale);
+                val_fp8.store(reinterpret_cast<fp8e4m3fn *>(params.norm_out) + idx);
+            } else {
+                scale = scale == 0.f ? 1.f : scale / fp8e4m3fnuz::max_value;
+                auto val_fp8 = convert_to_fp8<T, VEC_SIZE, fp8e4m3fnuz>(val, scale);
+                val_fp8.store(reinterpret_cast<fp8e4m3fnuz *>(params.norm_out) + idx);
+            }
             if (threadIdx.x == 0)
                 reinterpret_cast<float *>(params.scale_out)[tidx] = scale;
         } else {

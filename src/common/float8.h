@@ -91,11 +91,11 @@ __host__ __device__ uint8_t float32_to_float8(float _x, bool stoch = false,
 
     bool midpoint = (mantissa & ((1 << (mfmt - wm + exponent_diff)) - 1)) == static_cast<uint32_t>(1 << (mfmt - wm + exponent_diff - 1));
     /* This part is a bit tricky. The judgment of whether it is a tie needs to be
-   done before we shift right as shift right could rip off some residual part
-   and make something not midpoint look like midpoint. For example, the fp16
-   number 0x1002 (0 00100 0000000010), it is larger than midpoint, but after
-   shift right by 4 bits, it would look like midpoint.
-  */
+    done before we shift right as shift right could rip off some residual part
+    and make something not midpoint look like midpoint. For example, the fp16
+    number 0x1002 (0 00100 0000000010), it is larger than midpoint, but after
+    shift right by 4 bits, it would look like midpoint.
+    */
 
     if (exponent_diff > 0) {
         mantissa >>= exponent_diff;
@@ -209,7 +209,10 @@ inline __host__ __device__ float float32_from_float8(uint8_t x) {
 
 } // namespace fp8_impl
 
-struct alignas(1) gpu_fp8 {
+struct alignas(1) fp8e4m3fn {
+    enum {
+        max_value = 240,
+    };
     struct from_bits_t {
     };
     __host__ __device__ static constexpr from_bits_t from_bits() {
@@ -217,20 +220,53 @@ struct alignas(1) gpu_fp8 {
     }
     uint8_t data;
 
-    gpu_fp8() = default;
-    __host__ __device__ constexpr gpu_fp8(const gpu_fp8 &) = default;
-    __host__ __device__ constexpr gpu_fp8(uint8_t v) = delete;
-    explicit __host__ __device__ constexpr gpu_fp8(uint8_t v, from_bits_t) :
+    fp8e4m3fn() = default;
+    __host__ __device__ constexpr fp8e4m3fn(const fp8e4m3fn &) = default;
+    __host__ __device__ constexpr fp8e4m3fn(uint8_t v) = delete;
+    explicit __host__ __device__ constexpr fp8e4m3fn(uint8_t v, from_bits_t) :
         data(v) {
     }
 
-    explicit __host__ __device__ gpu_fp8(float v) {
+    explicit __host__ __device__ fp8e4m3fn(float v) {
+        data = fp8_impl::float32_to_float8<4, 3, false /*negative_zero_nan*/,
+                                           true /*clip*/>(v);
+    }
+
+    explicit __host__ __device__ fp8e4m3fn(double v) :
+        fp8e4m3fn(static_cast<float>(v)) {
+    }
+
+    explicit inline __host__ __device__ operator float() const {
+        return fp8_impl::float32_from_float8<4, 3, false /*negative_zero_nan*/>(
+            data);
+    }
+};
+
+struct alignas(1) fp8e4m3fnuz {
+    enum {
+        max_value = 120,
+    };
+    struct from_bits_t {
+    };
+    __host__ __device__ static constexpr from_bits_t from_bits() {
+        return from_bits_t();
+    }
+    uint8_t data;
+
+    fp8e4m3fnuz() = default;
+    __host__ __device__ constexpr fp8e4m3fnuz(const fp8e4m3fnuz &) = default;
+    __host__ __device__ constexpr fp8e4m3fnuz(uint8_t v) = delete;
+    explicit __host__ __device__ constexpr fp8e4m3fnuz(uint8_t v, from_bits_t) :
+        data(v) {
+    }
+
+    explicit __host__ __device__ fp8e4m3fnuz(float v) {
         data = fp8_impl::float32_to_float8<4, 3, true /*negative_zero_nan*/,
                                            true /*clip*/>(v);
     }
 
-    explicit __host__ __device__ gpu_fp8(double v) :
-        gpu_fp8(static_cast<float>(v)) {
+    explicit __host__ __device__ fp8e4m3fnuz(double v) :
+        fp8e4m3fnuz(static_cast<float>(v)) {
     }
 
     explicit inline __host__ __device__ operator float() const {
