@@ -91,7 +91,10 @@ class DistributedEnv:
         self.barrier()
 
     def __del__(self):
-        dist.destroy_process_group(self.group)
+        if self.group:
+            dist.destroy_process_group(self.group)
+        else:
+            dist.destroy_process_group(None)
 
     def barrier(self):
         torch.cuda.set_device(self.rank)
