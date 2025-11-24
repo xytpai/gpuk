@@ -7,9 +7,9 @@ import gpuk
 
 
 def worker(
-    rank, world_size, allreduce_in_, residual_in_, rms_weight_, eps, show_profile=False
+    rank, world_size, dtype, allreduce_in_, residual_in_, rms_weight_, eps, show_profile=False
 ):
-    dist_env = gpuk.DistributedEnv(rank, world_size, init_process_group=True)
+    dist_env = gpuk.DistributedEnv(rank, world_size, dtype=dtype, init_process_group=True)
     for i in range(len(allreduce_in_)):
         local_allreduce_in = allreduce_in_[i][rank].cuda(rank)
         local_residual_in = residual_in_[i].cuda(rank)
@@ -85,6 +85,7 @@ def testcase(
         worker,
         args=(
             world_size,
+            dtype,
             allreduce_in_,
             residual_in_,
             rms_weight_,
@@ -95,7 +96,7 @@ def testcase(
     )
 
 
-def main(world_size=8):
+def main(world_size=4):
     num_tokens = 1
     testcase(
         world_size=world_size,

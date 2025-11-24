@@ -39,8 +39,8 @@ public:
         gpuMemcpy(oneshot_comm_size_, &size, sizeof(int), gpuMemcpyHostToDevice);
         gpuMalloc(&oneshot_clear_, sizeof(int));
         gpuMemset(oneshot_clear_, 0, sizeof(int));
-        flush_data<float>((void *)((char *)data_ + size_in_bytes * 2 + NBLOCKS_PER_GPU * world_size * sizeof(int)), one_shot_comm_size);
-        dtype_ = ScalarType::Float;
+        flush_data<__bfloat16>((void *)((char *)data_ + size_in_bytes * 2 + NBLOCKS_PER_GPU * world_size * sizeof(int)), one_shot_comm_size);
+        dtype_ = ScalarType::BFloat16;
         gpuDeviceSynchronize();
     }
 
