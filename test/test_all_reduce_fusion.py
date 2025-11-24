@@ -95,7 +95,7 @@ def testcase(
     )
 
 
-def main(world_size=4):
+def main(world_size=8):
     num_tokens = 1
     testcase(
         world_size=world_size,
