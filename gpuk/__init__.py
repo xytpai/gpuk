@@ -76,14 +76,15 @@ class ARFusion:
 
 
 class DistributedEnv:
-    def __init__(self, rank, world_size, port=22339):
+    def __init__(self, rank, world_size, init_process_group=False, port=22339):
         torch.cuda.set_device(rank)
-        dist.init_process_group(
-            backend="nccl",
-            init_method=f"tcp://127.0.0.1:{port}",
-            rank=rank,
-            world_size=world_size,
-        )
+        if init_process_group:
+            dist.init_process_group(
+                backend="nccl",
+                init_method=f"tcp://127.0.0.1:{port}",
+                rank=rank,
+                world_size=world_size,
+            )
         self.rank = rank
         self.world_size = world_size
         self.group = dist.group.WORLD
@@ -91,7 +92,7 @@ class DistributedEnv:
         self.barrier()
 
     def __del__(self):
-        if self.group:
+        if getattr(self, 'group', None):
             dist.destroy_process_group(self.group)
         else:
             dist.destroy_process_group(None)

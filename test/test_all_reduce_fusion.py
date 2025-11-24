@@ -9,7 +9,7 @@ import gpuk
 def worker(
     rank, world_size, allreduce_in_, residual_in_, rms_weight_, eps, show_profile=False
 ):
-    dist_env = gpuk.DistributedEnv(rank, world_size)
+    dist_env = gpuk.DistributedEnv(rank, world_size, init_process_group=True)
     for i in range(len(allreduce_in_)):
         local_allreduce_in = allreduce_in_[i][rank].cuda(rank)
         local_residual_in = residual_in_[i].cuda(rank)

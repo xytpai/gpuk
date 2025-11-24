@@ -412,17 +412,17 @@ void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
     dim3 numBlocks(nblocks);
     void *args[] = {(void *)&params};
     if (token_num <= details::kOneShotMaxToken) {
-        gpuLaunchCooperativeKernel(
-            allreduce_fusion_kernel_oneshot_lamport<T, NRanks>, numBlocks,
-            threadsPerBlock, args, 0, stream);
-        // allreduce_fusion_kernel_oneshot_lamport<T, NRanks><<<numBlocks,
-        // threadsPerBlock, 0, stream>>>(params);
+        // gpuLaunchCooperativeKernel(
+        //     allreduce_fusion_kernel_oneshot_lamport<T, NRanks>, numBlocks,
+        //     threadsPerBlock, args, 0, stream);
+        allreduce_fusion_kernel_oneshot_lamport<T, NRanks><<<numBlocks,
+        threadsPerBlock, 0, stream>>>(params);
     } else {
-        gpuLaunchCooperativeKernel(
-            allreduce_fusion_kernel_twoshot_direct<T, NRanks>, numBlocks,
-            threadsPerBlock, args, 0, stream);
-        // allreduce_fusion_kernel_twoshot_direct<T, NRanks><<<numBlocks,
-        // threadsPerBlock, 0, stream>>>(params);
+        // gpuLaunchCooperativeKernel(
+        //     allreduce_fusion_kernel_twoshot_direct<T, NRanks>, numBlocks,
+        //     threadsPerBlock, args, 0, stream);
+        allreduce_fusion_kernel_twoshot_direct<T, NRanks><<<numBlocks,
+        threadsPerBlock, 0, stream>>>(params);
     }
 }
 
