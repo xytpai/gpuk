@@ -1,10 +1,10 @@
 ### Install
 
-'''bash
+```bash
 git clone https://github.com/xytpai/gpuk
 cd gpuk
 python setup.py develop
-'''
+```
 
 ### Test
 
