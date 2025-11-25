@@ -197,6 +197,8 @@ struct KernelElementType<c10::BFloat16> {
 void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
                    double eps, int64_t quant_type, Tensor &workspace) {
+    TORCH_CHECK(allreduce_in.is_contiguous() && residual_in.is_contiguous() && rms_gamma.is_contiguous());
+    TORCH_CHECK(residual_out.is_contiguous() && norm_out.is_contiguous() && scale_out.is_contiguous());
     auto dev = allreduce_in.device();
     c10::DeviceGuard dev_guard(dev);
 #ifdef __CUDACC__
