@@ -76,7 +76,7 @@ class ARFusion:
 
 
 class DistributedEnv:
-    def __init__(self, rank, world_size, dtype=torch.bfloat16, init_process_group=False, port=22339):
+    def __init__(self, rank, world_size, dtype=torch.bfloat16, init_process_group=False, port=23339):
         torch.cuda.set_device(rank)
         if init_process_group:
             dist.init_process_group(

@@ -405,17 +405,20 @@ __global__ void allreduce_fusion_kernel_twoshot_single_load(AllReduceFusionParam
     barrier.sync();
 
     // cross-device load
-    vec_t<T, VEC_SIZE> vals[NRanks];
+    vec_t<T, VEC_SIZE> acc;
+    acc.load(reinterpret_cast<T *>(comm.comm_bufs[params.rank]) + idx);
 #pragma unroll
-    for (int r = 0; r < NRanks; ++r) {
-        vals[r].load(reinterpret_cast<T *>(comm.comm_bufs[r]) + idx);
+    for (int r = 1; r < NRanks; ++r) {
+        auto r_ = (params.rank + r) % NRanks;
+        vec_t<T, VEC_SIZE> load_vec;
+        load_vec.load(reinterpret_cast<T *>(comm.comm_bufs[r_]) + idx);
+        vec_add_<T, VEC_SIZE>(acc, load_vec);
     }
-    vec_add_r_<T, VEC_SIZE, NRanks>(vals);
 
     int tidx = blockIdx.x;
     vec_t<T, VEC_SIZE> residual;
     residual.load(reinterpret_cast<T *>(params.residual_in) + idx);
-    vec_add_<T, VEC_SIZE>(residual, vals[0]);
+    vec_add_<T, VEC_SIZE>(residual, acc);
     epilogue<T, VEC_SIZE>(params, residual, gamma, idx, tidx);
 
     comm.update(barrier.m_flag_value);
