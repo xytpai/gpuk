@@ -25,9 +25,11 @@
 
 #define gpuSuccess hipSuccess
 #define gpuMemcpy hipMemcpy
+#define gpuMemcpyAsync hipMemcpyAsync
 #define gpuMemset hipMemset
 #define gpuMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define gpuMemcpyHostToDevice hipMemcpyHostToDevice
+#define gpuMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define gpuMalloc hipMalloc
 #define gpuFree hipFree
 #define gpuDeviceSynchronize hipDeviceSynchronize
@@ -77,9 +79,11 @@
 
 #define gpuSuccess cudaSuccess
 #define gpuMemcpy cudaMemcpy
+#define gpuMemcpyAsync cudaMemcpyAsync
 #define gpuMemset cudaMemset
 #define gpuMemcpyDeviceToHost cudaMemcpyDeviceToHost
 #define gpuMemcpyHostToDevice cudaMemcpyHostToDevice
+#define gpuMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
 #define gpuMalloc cudaMalloc
 #define gpuFree cudaFree
 #define gpuDeviceSynchronize cudaDeviceSynchronize

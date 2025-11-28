@@ -5,30 +5,30 @@
 
 namespace kernel_utils {
 
-template <typename T, typename func_t>
+template <typename T, int WARP_SIZE, typename func_t>
 __device__ __forceinline__ T warp_reduce(T val, func_t fn) {
 #pragma unroll
-    for (int offset = (32 >> 1); offset > 0; offset >>= 1) {
-        val = fn(val, __shfl_xor(val, offset, 32));
+    for (int offset = (WARP_SIZE >> 1); offset > 0; offset >>= 1) {
+        val = fn(val, __shfl_xor(val, offset, WARP_SIZE));
     }
     return val;
 }
 
-template <typename T, typename func_t>
+template <typename T, int WARP_SIZE, typename func_t>
 __inline__ __device__ T block_reduce(T val, func_t fn) {
-    static __shared__ T shared[32];
+    static __shared__ T shared[1024 / WARP_SIZE];
     const int tid = threadIdx.x;
-    const int w_tid = tid % 32;
-    const int wid = tid / 32;
-    val = warp_reduce<T, func_t>(val, fn);
+    const int w_tid = tid % WARP_SIZE;
+    const int wid = tid / WARP_SIZE;
+    val = warp_reduce<T, WARP_SIZE, func_t>(val, fn);
     if (w_tid == 0) {
         shared[wid] = val;
     }
     __syncthreads();
-    bool is_mask = threadIdx.x < (blockDim.x / 32.f);
+    bool is_mask = threadIdx.x < (blockDim.x / (float)WARP_SIZE);
     val = is_mask ? shared[w_tid] : (T)(0.0f);
     __syncthreads();
-    val = warp_reduce<T, func_t>(val, fn);
+    val = warp_reduce<T, WARP_SIZE, func_t>(val, fn);
     return val;
 }
 

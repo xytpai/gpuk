@@ -87,7 +87,7 @@ public:
         }
     }
 
-    Tensor get_workspace(const Tensor &ref) {
+    std::tuple<Tensor, fptr_t> get_workspace(const Tensor &ref) {
         std::vector<void *> workspace(world_size_ * 3 + 5);
         auto dtype = ref.scalar_type();
         int one_shot_comm_size = details::kOneShotMaxSize * world_size_ * 3;
@@ -117,7 +117,7 @@ public:
         auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
         auto workspace_tensor = torch::empty({static_cast<int64_t>(workspace.size() * sizeof(void *))}, options);
         std::memcpy(workspace_tensor.data_ptr(), workspace.data(), workspace.size() * sizeof(void *));
-        return workspace_tensor.to(ref.device());
+        return {workspace_tensor.to(ref.device()), (fptr_t)twoshot_comm_bufs_[rank_]};
     }
 
 private:
@@ -172,7 +172,7 @@ void open_ar_fusion_handles(fptr_t fptr, std::vector<Tensor> handles) {
     ptr->open_handles(handles);
 }
 
-Tensor get_ar_fusion_workspace(fptr_t fptr, const Tensor &ref) {
+std::tuple<Tensor, fptr_t> get_ar_fusion_workspace(fptr_t fptr, const Tensor &ref) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
     return ptr->get_workspace(ref);
 }
@@ -196,7 +196,7 @@ struct KernelElementType<c10::BFloat16> {
 
 void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
-                   double eps, int64_t quant_type, Tensor &workspace) {
+                   double eps, int64_t quant_type, Tensor &workspace, fptr_t comm_buf) {
     TORCH_CHECK(allreduce_in.is_contiguous() && residual_in.is_contiguous() && rms_gamma.is_contiguous());
     TORCH_CHECK(residual_out.is_contiguous() && norm_out.is_contiguous() && scale_out.is_contiguous());
     auto dev = allreduce_in.device();
@@ -215,6 +215,7 @@ void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &r
             using k_scalar_t = KernelElementType<scalar_t>::type;
             allreduce_rms_fusion_impl<k_scalar_t>(
                 (void **)workspace.data_ptr(),
+                comm_buf,
                 rank,
                 nranks,
                 size,

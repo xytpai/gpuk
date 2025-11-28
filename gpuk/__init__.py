@@ -90,7 +90,7 @@ class DistributedEnv:
         self.group = dist.group.WORLD
         self.ar_fusion = ARFusion(group=self.group)
         self.ref_tensor = torch.rand(1, dtype=dtype).cuda(rank)
-        self.workspace = self.ar_fusion.get_workspace(self.ref_tensor)
+        self.workspace, self.comm_buf = self.ar_fusion.get_workspace(self.ref_tensor)
         self.barrier()
 
     def __del__(self):
@@ -159,6 +159,7 @@ class DistributedEnv:
             eps,
             fp8_policy_id if fp8_out else 0,
             self.workspace,
+            self.comm_buf,
         )
         if fp8_out:
             return residual_out, norm_out, scale_out

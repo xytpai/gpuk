@@ -6,6 +6,7 @@ using namespace std;
 using namespace kernel_utils;
 namespace cg = cooperative_groups;
 
+#define WARP_SIZE 64
 #define NBLOCKS_PER_GPU 256
 
 namespace details {
@@ -37,7 +38,7 @@ struct SyncComm {
 
     __device__ __forceinline__ void update(int new_flag_value) {
         if (blockIdx.x == 0 && threadIdx.x == 0) {
-            while (atomicAdd(counter_ptr, 0) != gridDim.x) {
+            while (*reinterpret_cast<int volatile *>(counter_ptr) != gridDim.x) {
             }
             *flag_ptr = new_flag_value;
             *counter_ptr = 0;
@@ -66,17 +67,17 @@ public:
     }
 
     __device__ __forceinline__ void sync() {
-        constexpr int kBarrierFlagCount = NBLOCKS_PER_GPU;
         __syncthreads();
         if (threadIdx.x < NRanks) {
             m_flag_value = next_flag(m_flag_value);
             // To avoid the ABA problem, we need to synchronize the correct flag value
             // to all barrier_flags, even if the corresponding CTA has not been
             // launched.
-            for (int flag_idx = blockIdx.x; flag_idx < kBarrierFlagCount;
-                 flag_idx += gridDim.x) {
-                st_flag(m_target_flag + flag_idx * NRanks, m_flag_value);
-            }
+            // for (int flag_idx = blockIdx.x; flag_idx < NBLOCKS_PER_GPU;
+            //      flag_idx += gridDim.x) {
+            //     st_flag(m_target_flag + flag_idx * NRanks, m_flag_value);
+            // }
+            st_flag(m_target_flag + blockIdx.x * NRanks, m_flag_value);
             while (ld_flag(m_current_flag) == prev_flag(m_flag_value)) {
             }
         }
@@ -177,6 +178,7 @@ struct AllReduceFusionParams {
     int size;
     int hidden_dim;
     void **workspace;
+    void *comm_buf;
     void *allreduce_in;
     void *residual_in;
     void *residual_out;
@@ -210,7 +212,7 @@ __device__ __forceinline__ vec_t<OutT, VEC_SIZE> rms_norm(AllReduceFusionParams<
         float v = static_cast<float>(reinterpret_cast<T const *>(&residual)[i]);
         acc += v * v;
     }
-    acc = block_reduce<float>(acc, std::plus<float>());
+    acc = block_reduce<float, WARP_SIZE>(acc, std::plus<float>());
     if (threadIdx.x == 0) {
         s_val = rsqrtf(acc / m_params.hidden_dim + m_params.rms_eps);
     }
@@ -233,7 +235,7 @@ __device__ __forceinline__ float reduce_abs_max(vec_t<T, VEC_SIZE> const &data) 
         float v = static_cast<float>(reinterpret_cast<T const *>(&data)[i]);
         acc = fn(acc, std::abs(v));
     }
-    acc = block_reduce<float>(acc, fn);
+    acc = block_reduce<float, WARP_SIZE>(acc, fn);
     if (threadIdx.x == 0) {
         s_val = acc;
     }
@@ -387,17 +389,16 @@ __global__ void allreduce_fusion_kernel_oneshot_lamport(AllReduceFusionParams<T>
 }
 
 template <typename T, int NRanks>
-__global__ void allreduce_fusion_kernel_twoshot_single_load(AllReduceFusionParams<T> params) {
+__global__ void allreduce_fusion_kernel_single_load(AllReduceFusionParams<T> params) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-
+    int tidx = blockIdx.x;
     int access_id_in_token = threadIdx.x * VEC_SIZE;
+    int idx = tidx * params.hidden_dim + access_id_in_token;
 
     vec_t<T, VEC_SIZE> gamma;
     gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
 
     comm::SyncComm<NRanks> comm(params.workspace);
-
-    int idx = blockIdx.x * params.hidden_dim + access_id_in_token;
     reinterpret_cast<float4 *>(comm.comm_bufs[params.rank])[idx / VEC_SIZE] =
         reinterpret_cast<float4 *>(params.allreduce_in)[idx / VEC_SIZE];
 
@@ -405,20 +406,17 @@ __global__ void allreduce_fusion_kernel_twoshot_single_load(AllReduceFusionParam
     barrier.sync();
 
     // cross-device load
-    vec_t<T, VEC_SIZE> acc;
-    acc.load(reinterpret_cast<T *>(comm.comm_bufs[params.rank]) + idx);
+    vec_t<T, VEC_SIZE> vals[NRanks];
 #pragma unroll
-    for (int r = 1; r < NRanks; ++r) {
+    for (int r = 0; r < NRanks; ++r) {
         auto r_ = (params.rank + r) % NRanks;
-        vec_t<T, VEC_SIZE> load_vec;
-        load_vec.load(reinterpret_cast<T *>(comm.comm_bufs[r_]) + idx);
-        vec_add_<T, VEC_SIZE>(acc, load_vec);
+        vals[r].load(reinterpret_cast<T *>(comm.comm_bufs[r_]) + idx);
     }
+    vec_add_r_<T, VEC_SIZE, NRanks>(vals);
 
-    int tidx = blockIdx.x;
     vec_t<T, VEC_SIZE> residual;
     residual.load(reinterpret_cast<T *>(params.residual_in) + idx);
-    vec_add_<T, VEC_SIZE>(residual, acc);
+    vec_add_<T, VEC_SIZE>(residual, vals[0]);
     epilogue<T, VEC_SIZE>(params, residual, gamma, idx, tidx);
 
     comm.update(barrier.m_flag_value);
@@ -433,13 +431,14 @@ void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
     int token_num = params.size / params.hidden_dim;
     int threads_per_token = params.hidden_dim / VEC_SIZE;
     dim3 threadsPerBlock(threads_per_token);
-    // void *args[] = {(void *)&params};
+    void *args[] = {(void *)&params};
     if (token_num <= NBLOCKS_PER_GPU) {
+        // gpuMemcpyAsync(params.comm_buf, params.allreduce_in, params.size * sizeof(T), gpuMemcpyDeviceToDevice, stream);
         dim3 numBlocks(token_num);
-        allreduce_fusion_kernel_twoshot_single_load<T, NRanks><<<numBlocks,
-                                                                 threadsPerBlock, 0, stream>>>(params);
+        allreduce_fusion_kernel_single_load<T, NRanks><<<numBlocks,
+                                                         threadsPerBlock, 0, stream>>>(params);
     } else {
-        int nblocks = std::min(token_num, NBLOCKS_PER_GPU);
+        int nblocks = std::min((token_num + NRanks - 1) / NRanks, NBLOCKS_PER_GPU);
         if (params.size * sizeof(T) >= 1024 * 1024 * 128) {
             nblocks /= 2;
         }
@@ -450,7 +449,7 @@ void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
 }
 
 template <typename T>
-void allreduce_rms_fusion_impl(void **workspace, int rank, int nranks, int size,
+void allreduce_rms_fusion_impl(void **workspace, int64_t comm_buf, int rank, int nranks, int size,
                                int hidden_dim, void *allreduce_in,
                                void *residual_in, void *residual_out,
                                void *norm_out, void *rms_gamma, float eps,
@@ -462,6 +461,7 @@ void allreduce_rms_fusion_impl(void **workspace, int rank, int nranks, int size,
     params.size = size;
     params.hidden_dim = hidden_dim;
     params.workspace = workspace;
+    params.comm_buf = reinterpret_cast<void *>(comm_buf);
     params.allreduce_in = allreduce_in;
     params.residual_in = residual_in;
     params.residual_out = residual_out;

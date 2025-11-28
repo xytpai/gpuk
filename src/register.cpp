@@ -10,10 +10,10 @@ TORCH_LIBRARY(gpuk, m) {
     m.impl("get_ar_fusion_handle", &get_ar_fusion_handle);
     m.def("open_ar_fusion_handles(SymInt fptr, Tensor[] handles) -> ()");
     m.impl("open_ar_fusion_handles", &open_ar_fusion_handles);
-    m.def("get_ar_fusion_workspace(SymInt fptr, Tensor ref) -> Tensor");
+    m.def("get_ar_fusion_workspace(SymInt fptr, Tensor ref) -> (Tensor, int)");
     m.def("allreduce_rms(SymInt rank, SymInt nranks, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
-          "norm_out, Tensor scale_out, float eps, SymInt quant_type, Tensor workspace) -> ()");
+          "norm_out, Tensor scale_out, float eps, SymInt quant_type, Tensor workspace, SymInt comm_buf) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
