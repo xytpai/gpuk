@@ -2,69 +2,48 @@
 #include "all_reduce_fusion_impl.h"
 
 class CommWorkspace {
-    static constexpr int MAX_RANKS = 16;
-
-    template <typename T>
-    void flush_data(void *data, int one_shot_comm_size) {
-        using element_t = typename neg_zero<T>::bits_type;
-        std::vector<element_t> arr;
-        arr.resize(one_shot_comm_size / sizeof(T));
-        for (int i = 0; i < one_shot_comm_size / sizeof(element_t); ++i) {
-            volatile element_t v = neg_zero<T>::neg_zero_bits;
-            arr[i] = v;
-        }
-        gpuMemcpy(data, arr.data(), one_shot_comm_size, gpuMemcpyHostToDevice);
-    }
-
 public:
-    CommWorkspace(int64_t rank, int64_t world_size, int64_t size_in_bytes) {
-        TORCH_CHECK(world_size < MAX_RANKS && rank < world_size);
+    CommWorkspace(int64_t rank, int64_t world_size, int64_t size_in_bytes, int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
+        TORCH_CHECK(rank < world_size);
         gpuSetDevice(rank);
         rank_ = rank;
         world_size_ = world_size;
         size_in_bytes_ = size_in_bytes;
-        int data_size = size_in_bytes * 2 + NBLOCKS_PER_GPU * world_size * sizeof(int);
-        int one_shot_comm_size = details::kOneShotMaxSize * world_size_ * 3;
-        data_size += one_shot_comm_size;
-        gpuMalloc(&data_, data_size);
-        gpuMalloc(&counter_, sizeof(int));
-        gpuMemset(counter_, 0, sizeof(int));
-        gpuMalloc(&twoshot_sync_clock_, sizeof(int));
-        gpuMemset(twoshot_sync_clock_, 0, sizeof(int));
-        // oneshot
-        gpuMalloc(&oneshot_sync_clock_, sizeof(int));
-        gpuMemset(oneshot_sync_clock_, 0, sizeof(int));
-        int size = details::kOneShotMaxSize * world_size;
-        gpuMalloc(&oneshot_comm_size_, sizeof(int));
-        gpuMemcpy(oneshot_comm_size_, &size, sizeof(int), gpuMemcpyHostToDevice);
-        gpuMalloc(&oneshot_clear_, sizeof(int));
-        gpuMemset(oneshot_clear_, 0, sizeof(int));
-        flush_data<__bfloat16>((void *)((char *)data_ + size_in_bytes * 2 + NBLOCKS_PER_GPU * world_size * sizeof(int)), one_shot_comm_size);
-        dtype_ = ScalarType::BFloat16;
-        gpuDeviceSynchronize();
+        max_thread_blocks_ = max_thread_blocks;
+        gpuMalloc(&sync_clock_, max_thread_blocks_ * sizeof(int));
+        gpuMalloc(&barrier_flags_, max_thread_blocks_ * world_size_ * sizeof(int));
+        gpuMalloc(&data_, size_in_bytes_ * 2);
+        gpuMemset(sync_clock_, 0, max_thread_blocks_ * sizeof(int));
+        gpuMemset(barrier_flags_, 0, max_thread_blocks_ * world_size_ * sizeof(int));
     }
 
     ~CommWorkspace() {
-        gpuFree(counter_);
-        gpuFree(twoshot_sync_clock_);
+        gpuFree(sync_clock_);
+        gpuFree(barrier_flags_);
         gpuFree(data_);
-        gpuFree(oneshot_sync_clock_);
-        gpuFree(oneshot_clear_);
-        gpuFree(oneshot_comm_size_);
     }
 
-    Tensor get_handle() {
+    Tensor get_handle(void *ptr) {
         gpuIpcMemHandle_t handle;
-        TORCH_CHECK(gpuIpcGetMemHandle(&handle, data_) == gpuSuccess);
+        TORCH_CHECK(gpuIpcGetMemHandle(&handle, ptr) == gpuSuccess);
         auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
         auto data_handle = torch::empty({static_cast<int64_t>(sizeof(gpuIpcMemHandle_t))}, options);
         std::memcpy(data_handle.data_ptr(), &handle, sizeof(gpuIpcMemHandle_t));
         return data_handle;
     }
 
-    void open_handles(std::vector<Tensor> handles) {
+    Tensor get_barrier_handle() {
+        return get_handle(barrier_flags_);
+    }
+
+    Tensor get_data_handle() {
+        return get_handle(data_);
+    }
+
+    void open_handles(std::vector<Tensor> handles, void *ptr, std::vector<void *> &ipc_ptrs) {
         std::vector<gpuIpcMemHandle_t> ipc_handles;
         ipc_handles.reserve(world_size_);
+        ipc_ptrs.resize(world_size_);
         for (auto &handle : handles) {
             // Ensure the tensor is on the same device as the current device.
             gpuIpcMemHandle_t ipc_handle;
@@ -74,73 +53,45 @@ public:
         for (int i = 0; i < world_size_; ++i) {
             if (i != rank_) {
                 TORCH_CHECK(
-                    gpuIpcOpenMemHandle((void **)&ipc_data_[i], ipc_handles[i], gpuIpcMemLazyEnablePeerAccess) == gpuSuccess);
+                    gpuIpcOpenMemHandle((void **)&ipc_ptrs[i], ipc_handles[i], gpuIpcMemLazyEnablePeerAccess) == gpuSuccess);
             } else {
-                ipc_data_[i] = data_;
+                ipc_ptrs[i] = ptr;
             }
         }
-        for (int i = 0; i < world_size_; ++i) {
-            twoshot_comm_bufs_[i] = ipc_data_[i];
-            twoshot_barrier_flags_[i] = (int *)((char *)ipc_data_[i] + 2 * size_in_bytes_);
-            // oneshot
-            oneshot_comm_bufs_[i] = (void *)((char *)ipc_data_[i] + 2 * size_in_bytes_ + NBLOCKS_PER_GPU * world_size_ * sizeof(int));
-        }
+    }
+
+    void open_barrier_handles(std::vector<Tensor> handles) {
+        open_handles(handles, barrier_flags_, ipc_barrier_flags_);
+    }
+
+    void open_data_handles(std::vector<Tensor> handles) {
+        open_handles(handles, data_, ipc_data_);
     }
 
     std::tuple<Tensor, fptr_t> get_workspace(const Tensor &ref) {
-        std::vector<void *> workspace(world_size_ * 3 + 5);
+        std::vector<void *> workspace(world_size_ * 2 + 1);
         auto dtype = ref.scalar_type();
-        int one_shot_comm_size = details::kOneShotMaxSize * world_size_ * 3;
-        if (dtype != dtype_) {
-            if (dtype == ScalarType::Float) {
-                flush_data<float>(oneshot_comm_bufs_[rank_], one_shot_comm_size);
-            } else if (dtype == ScalarType::Half) {
-                flush_data<__half>(oneshot_comm_bufs_[rank_], one_shot_comm_size);
-            } else if (dtype == ScalarType::BFloat16) {
-                flush_data<__bfloat16>(oneshot_comm_bufs_[rank_], one_shot_comm_size);
-            } else {
-                TORCH_CHECK("datatype not support!");
-            }
-            dtype_ = dtype;
+        for (int r = 0; r < world_size_; ++r) {
+            workspace[r] = ipc_data_[r];
+            workspace[world_size_ + r] = ipc_barrier_flags_[r];
         }
-        for (int peer = 0; peer < world_size_; ++peer) {
-            workspace[peer] = (void *)twoshot_comm_bufs_[peer];
-            workspace[world_size_ + peer] = (void *)twoshot_barrier_flags_[peer];
-            workspace[2 * world_size_ + peer] = (void *)oneshot_comm_bufs_[peer];
-        }
-        workspace[world_size_ * 3 + 0] = (void *)counter_;
-        workspace[world_size_ * 3 + 1] = (void *)twoshot_sync_clock_;
-        // oneshot
-        workspace[world_size_ * 3 + 2] = (void *)oneshot_sync_clock_;
-        workspace[world_size_ * 3 + 3] = (void *)oneshot_comm_size_;
-        workspace[world_size_ * 3 + 4] = (void *)oneshot_clear_;
+        workspace[world_size_ * 2 + 0] = sync_clock_;
         auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
         auto workspace_tensor = torch::empty({static_cast<int64_t>(workspace.size() * sizeof(void *))}, options);
         std::memcpy(workspace_tensor.data_ptr(), workspace.data(), workspace.size() * sizeof(void *));
-        return {workspace_tensor.to(ref.device()), (fptr_t)twoshot_comm_bufs_[rank_]};
+        return {workspace_tensor.to(ref.device()), (fptr_t)data_};
     }
 
 private:
-    // meta
     int rank_;
     int world_size_;
     int size_in_bytes_;
-
-    // data
+    int max_thread_blocks_;
+    void *sync_clock_;
+    void *barrier_flags_;
     void *data_;
-    void *ipc_data_[MAX_RANKS];
-
-    int *counter_;
-    // twoshot
-    void *twoshot_comm_bufs_[MAX_RANKS];    // 2 * size * sizeof(T)
-    int *twoshot_barrier_flags_[MAX_RANKS]; // nblocks * world_size
-    int *twoshot_sync_clock_;
-    // oneshot
-    void *oneshot_comm_bufs_[MAX_RANKS];
-    int *oneshot_sync_clock_;
-    int *oneshot_comm_size_;
-    int *oneshot_clear_;
-    ScalarType dtype_;
+    std::vector<void *> ipc_barrier_flags_;
+    std::vector<void *> ipc_data_;
 };
 
 fptr_t init_ar_fusion(int64_t rank, int64_t world_size, int64_t max_size_in_bytes) {
@@ -162,14 +113,24 @@ void destroy_ar_fusion(fptr_t fptr) {
     delete ptr;
 }
 
-Tensor get_ar_fusion_handle(fptr_t fptr) {
+Tensor get_ar_fusion_barrier_handle(fptr_t fptr) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    return ptr->get_handle();
+    return ptr->get_barrier_handle();
 }
 
-void open_ar_fusion_handles(fptr_t fptr, std::vector<Tensor> handles) {
+Tensor get_ar_fusion_data_handle(fptr_t fptr) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    ptr->open_handles(handles);
+    return ptr->get_data_handle();
+}
+
+void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<Tensor> handles) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    ptr->open_barrier_handles(handles);
+}
+
+void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    ptr->open_data_handles(handles);
 }
 
 std::tuple<Tensor, fptr_t> get_ar_fusion_workspace(fptr_t fptr, const Tensor &ref) {

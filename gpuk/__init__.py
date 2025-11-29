@@ -16,8 +16,10 @@ prefix = f"torch.ops.{package_name}"
 
 init_ar_fusion = eval(f"{prefix}.init_ar_fusion")
 destroy_ar_fusion = eval(f"{prefix}.destroy_ar_fusion")
-get_ar_fusion_handle = eval(f"{prefix}.get_ar_fusion_handle")
-open_ar_fusion_handles = eval(f"{prefix}.open_ar_fusion_handles")
+get_ar_fusion_barrier_handle = eval(f"{prefix}.get_ar_fusion_barrier_handle")
+get_ar_fusion_data_handle = eval(f"{prefix}.get_ar_fusion_data_handle")
+open_ar_fusion_barrier_handles = eval(f"{prefix}.open_ar_fusion_barrier_handles")
+open_ar_fusion_data_handles = eval(f"{prefix}.open_ar_fusion_data_handles")
 get_ar_fusion_workspace = eval(f"{prefix}.get_ar_fusion_workspace")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 
@@ -60,10 +62,14 @@ class ARFusion:
 
         torch.cuda.set_device(rank)
         self.fptr = init_ar_fusion(rank, world_size, max_size_in_bytes)
-        handle = get_ar_fusion_handle(self.fptr)
-        handle_list = [None] * world_size
-        dist.all_gather_object(handle_list, handle, group=self.group)
-        open_ar_fusion_handles(self.fptr, handle_list)
+        barrier_handle = get_ar_fusion_barrier_handle(self.fptr)
+        data_handle = get_ar_fusion_data_handle(self.fptr)
+        barrier_handle_list = [None] * world_size
+        data_handle_list = [None] * world_size
+        dist.all_gather_object(barrier_handle_list, barrier_handle, group=self.group)
+        dist.all_gather_object(data_handle_list, data_handle, group=self.group)
+        open_ar_fusion_barrier_handles(self.fptr, barrier_handle_list)
+        open_ar_fusion_data_handles(self.fptr, data_handle_list)
         torch.cuda.synchronize(rank)
         dist.barrier(group=group)
 

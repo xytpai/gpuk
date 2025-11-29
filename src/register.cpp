@@ -6,10 +6,17 @@ TORCH_LIBRARY(gpuk, m) {
     m.impl("init_ar_fusion", &init_ar_fusion);
     m.def("destroy_ar_fusion(SymInt fptr) -> ()");
     m.impl("destroy_ar_fusion", &destroy_ar_fusion);
-    m.def("get_ar_fusion_handle(SymInt fptr) -> Tensor");
-    m.impl("get_ar_fusion_handle", &get_ar_fusion_handle);
-    m.def("open_ar_fusion_handles(SymInt fptr, Tensor[] handles) -> ()");
-    m.impl("open_ar_fusion_handles", &open_ar_fusion_handles);
+
+    m.def("get_ar_fusion_barrier_handle(SymInt fptr) -> Tensor");
+    m.impl("get_ar_fusion_barrier_handle", &get_ar_fusion_barrier_handle);
+    m.def("get_ar_fusion_data_handle(SymInt fptr) -> Tensor");
+    m.impl("get_ar_fusion_data_handle", &get_ar_fusion_data_handle);
+
+    m.def("open_ar_fusion_barrier_handles(SymInt fptr, Tensor[] handles) -> ()");
+    m.impl("open_ar_fusion_barrier_handles", &open_ar_fusion_barrier_handles);
+    m.def("open_ar_fusion_data_handles(SymInt fptr, Tensor[] handles) -> ()");
+    m.impl("open_ar_fusion_data_handles", &open_ar_fusion_data_handles);
+
     m.def("get_ar_fusion_workspace(SymInt fptr, Tensor ref) -> (Tensor, int)");
     m.def("allreduce_rms(SymInt rank, SymInt nranks, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
