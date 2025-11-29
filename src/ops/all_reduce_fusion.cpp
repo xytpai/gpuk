@@ -1,6 +1,40 @@
 #include "ops.h"
 #include "all_reduce_fusion_impl.h"
 
+namespace ipc_details {
+
+Tensor get_handle(void *ptr) {
+    gpuIpcMemHandle_t handle;
+    TORCH_CHECK(gpuIpcGetMemHandle(&handle, ptr) == gpuSuccess);
+    auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    auto data_handle = torch::empty({static_cast<int64_t>(sizeof(gpuIpcMemHandle_t))}, options);
+    std::memcpy(data_handle.data_ptr(), &handle, sizeof(gpuIpcMemHandle_t));
+    return data_handle;
+}
+
+void open_handles(int rank, std::vector<Tensor> &handles, void *ptr, std::vector<void *> &ipc_ptrs) {
+    std::vector<gpuIpcMemHandle_t> ipc_handles;
+    int world_size = handles.size();
+    ipc_handles.reserve(world_size);
+    ipc_ptrs.resize(world_size);
+    for (auto &handle : handles) {
+        // Ensure the tensor is on the same device as the current device.
+        gpuIpcMemHandle_t ipc_handle;
+        std::memcpy(&ipc_handle, handle.data_ptr(), sizeof(gpuIpcMemHandle_t));
+        ipc_handles.push_back(ipc_handle);
+    }
+    for (int i = 0; i < world_size; ++i) {
+        if (i != rank) {
+            TORCH_CHECK(
+                gpuIpcOpenMemHandle((void **)&ipc_ptrs[i], ipc_handles[i], gpuIpcMemLazyEnablePeerAccess) == gpuSuccess);
+        } else {
+            ipc_ptrs[i] = ptr;
+        }
+    }
+}
+
+} // namespace ipc_details
+
 class CommWorkspace {
 public:
     CommWorkspace(int64_t rank, int64_t world_size, int64_t size_in_bytes, int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
@@ -23,63 +57,55 @@ public:
         gpuFree(data_);
     }
 
-    Tensor get_handle(void *ptr) {
-        gpuIpcMemHandle_t handle;
-        TORCH_CHECK(gpuIpcGetMemHandle(&handle, ptr) == gpuSuccess);
-        auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        auto data_handle = torch::empty({static_cast<int64_t>(sizeof(gpuIpcMemHandle_t))}, options);
-        std::memcpy(data_handle.data_ptr(), &handle, sizeof(gpuIpcMemHandle_t));
-        return data_handle;
-    }
-
     Tensor get_barrier_handle() {
-        return get_handle(barrier_flags_);
+        return ipc_details::get_handle(barrier_flags_);
     }
 
     Tensor get_data_handle() {
-        return get_handle(data_);
-    }
-
-    void open_handles(std::vector<Tensor> handles, void *ptr, std::vector<void *> &ipc_ptrs) {
-        std::vector<gpuIpcMemHandle_t> ipc_handles;
-        ipc_handles.reserve(world_size_);
-        ipc_ptrs.resize(world_size_);
-        for (auto &handle : handles) {
-            // Ensure the tensor is on the same device as the current device.
-            gpuIpcMemHandle_t ipc_handle;
-            std::memcpy(&ipc_handle, handle.data_ptr(), sizeof(gpuIpcMemHandle_t));
-            ipc_handles.push_back(ipc_handle);
-        }
-        for (int i = 0; i < world_size_; ++i) {
-            if (i != rank_) {
-                TORCH_CHECK(
-                    gpuIpcOpenMemHandle((void **)&ipc_ptrs[i], ipc_handles[i], gpuIpcMemLazyEnablePeerAccess) == gpuSuccess);
-            } else {
-                ipc_ptrs[i] = ptr;
-            }
-        }
+        return ipc_details::get_handle(data_);
     }
 
     void open_barrier_handles(std::vector<Tensor> handles) {
-        open_handles(handles, barrier_flags_, ipc_barrier_flags_);
+        ipc_details::open_handles(rank_, handles, barrier_flags_, ipc_barrier_flags_);
     }
 
     void open_data_handles(std::vector<Tensor> handles) {
-        open_handles(handles, data_, ipc_data_);
+        ipc_details::open_handles(rank_, handles, data_, ipc_data_);
     }
 
-    std::tuple<Tensor, fptr_t> get_workspace(const Tensor &ref) {
-        std::vector<void *> workspace(world_size_ * 2 + 1);
-        auto dtype = ref.scalar_type();
-        for (int r = 0; r < world_size_; ++r) {
-            workspace[r] = ipc_data_[r];
-            workspace[world_size_ + r] = ipc_barrier_flags_[r];
+    HostCommPtrs get_cptrs(const Tensor &input, gpuStream_t stream) {
+        HostCommPtrs cptrs;
+        cptrs.data_ptrs.resize(world_size_);
+        cptrs.barrier_flag_ptrs.resize(world_size_);
+        void *ptr = (void *)input.data_ptr();
+        auto it = cached_ipc_data_.find(ptr);
+        if (it != cached_ipc_data_.end()) {
+            for (int r = 0; r < world_size_; ++r) {
+                cptrs.data_ptrs[r] = (it->second)[r];
+            }
+        } else {
+            gpuMemcpyAsync(data_, ptr, input.numel() * input.element_size(), gpuMemcpyDeviceToDevice, stream);
+            for (int r = 0; r < world_size_; ++r) {
+                cptrs.data_ptrs[r] = ipc_data_[r];
+            }
         }
-        workspace[world_size_ * 2 + 0] = sync_clock_;
-        auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        auto workspace_tensor = torch::empty({static_cast<int64_t>(workspace.size() * sizeof(void *))}, options);
-        std::memcpy(workspace_tensor.data_ptr(), workspace.data(), workspace.size() * sizeof(void *));
-        return {workspace_tensor.to(ref.device()), (fptr_t)data_};
+        for (int r = 0; r < world_size_; ++r) {
+            cptrs.barrier_flag_ptrs[r] = ipc_barrier_flags_[r];
+        }
+        cptrs.sync_clock = sync_clock_;
+        cptrs.rank = rank_;
+        cptrs.nranks = world_size_;
+        return cptrs;
+    }
+
+    void capture(const Tensor &input, std::vector<Tensor> handles) {
+        void *ptr = (void *)input.data_ptr();
+        auto it = cached_ipc_data_.find(ptr);
+        if (it == cached_ipc_data_.end()) {
+            std::vector<void *> ipc_data;
+            ipc_details::open_handles(rank_, handles, ptr, ipc_data);
+            cached_ipc_data_[ptr] = ipc_data;
+        }
     }
 
 private:
@@ -92,6 +118,7 @@ private:
     void *data_;
     std::vector<void *> ipc_barrier_flags_;
     std::vector<void *> ipc_data_;
+    std::unordered_map<void *, std::vector<void *>> cached_ipc_data_;
 };
 
 fptr_t init_ar_fusion(int64_t rank, int64_t world_size, int64_t max_size_in_bytes) {
@@ -133,9 +160,14 @@ void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles) {
     ptr->open_data_handles(handles);
 }
 
-std::tuple<Tensor, fptr_t> get_ar_fusion_workspace(fptr_t fptr, const Tensor &ref) {
+void ar_fusion_capture(fptr_t fptr, const Tensor &input, std::vector<Tensor> handles) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    return ptr->get_workspace(ref);
+    ptr->capture(input, handles);
+}
+
+Tensor get_tensor_ipc_handle(const Tensor &input) {
+    void *ptr = (void *)input.data_ptr();
+    return ipc_details::get_handle(ptr);
 }
 
 template <typename T>
@@ -155,9 +187,9 @@ struct KernelElementType<c10::BFloat16> {
 #include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 #endif
 
-void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &residual_in,
+void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
-                   double eps, int64_t quant_type, Tensor &workspace, fptr_t comm_buf) {
+                   double eps, int64_t quant_type) {
     TORCH_CHECK(allreduce_in.is_contiguous() && residual_in.is_contiguous() && rms_gamma.is_contiguous());
     TORCH_CHECK(residual_out.is_contiguous() && norm_out.is_contiguous() && scale_out.is_contiguous());
     auto dev = allreduce_in.device();
@@ -168,6 +200,8 @@ void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &r
 #endif
     int size = allreduce_in.numel();
     int hidden_dim = allreduce_in.size(-1);
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    auto cptrs = ptr->get_cptrs(allreduce_in, stream);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         kHalf,
         kBFloat16,
@@ -175,10 +209,7 @@ void allreduce_rms(int64_t rank, int64_t nranks, Tensor &allreduce_in, Tensor &r
         "allreduce_rms", [&] {
             using k_scalar_t = KernelElementType<scalar_t>::type;
             allreduce_rms_fusion_impl<k_scalar_t>(
-                (void **)workspace.data_ptr(),
-                comm_buf,
-                rank,
-                nranks,
+                cptrs,
                 size,
                 hidden_dim,
                 (void *)allreduce_in.data_ptr<scalar_t>(),

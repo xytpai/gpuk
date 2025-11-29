@@ -17,13 +17,17 @@ TORCH_LIBRARY(gpuk, m) {
     m.def("open_ar_fusion_data_handles(SymInt fptr, Tensor[] handles) -> ()");
     m.impl("open_ar_fusion_data_handles", &open_ar_fusion_data_handles);
 
-    m.def("get_ar_fusion_workspace(SymInt fptr, Tensor ref) -> (Tensor, int)");
-    m.def("allreduce_rms(SymInt rank, SymInt nranks, Tensor allreduce_in, "
+    m.def("ar_fusion_capture(SymInt fptr, Tensor input, Tensor[] handles) -> ()");
+    m.impl("ar_fusion_capture", &ar_fusion_capture);
+
+    m.def("get_tensor_ipc_handle(Tensor input) -> Tensor");
+    m.impl("get_tensor_ipc_handle", &get_tensor_ipc_handle);
+
+    m.def("allreduce_rms(SymInt fptr, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
-          "norm_out, Tensor scale_out, float eps, SymInt quant_type, Tensor workspace, SymInt comm_buf) -> ()");
+          "norm_out, Tensor scale_out, float eps, SymInt quant_type) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
-    m.impl("get_ar_fusion_workspace", &get_ar_fusion_workspace);
     m.impl("allreduce_rms", &allreduce_rms);
 }

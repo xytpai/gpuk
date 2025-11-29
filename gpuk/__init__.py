@@ -20,7 +20,8 @@ get_ar_fusion_barrier_handle = eval(f"{prefix}.get_ar_fusion_barrier_handle")
 get_ar_fusion_data_handle = eval(f"{prefix}.get_ar_fusion_data_handle")
 open_ar_fusion_barrier_handles = eval(f"{prefix}.open_ar_fusion_barrier_handles")
 open_ar_fusion_data_handles = eval(f"{prefix}.open_ar_fusion_data_handles")
-get_ar_fusion_workspace = eval(f"{prefix}.get_ar_fusion_workspace")
+ar_fusion_capture = eval(f"{prefix}.ar_fusion_capture")
+get_tensor_ipc_handle = eval(f"{prefix}.get_tensor_ipc_handle")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 
 
@@ -54,6 +55,7 @@ class ARFusion:
         self.rank = rank
         self.fptr = None
         world_size = dist.get_world_size(group=self.group)
+        self.world_size = world_size
         if world_size == 1:
             return
 
@@ -70,11 +72,27 @@ class ARFusion:
         dist.all_gather_object(data_handle_list, data_handle, group=self.group)
         open_ar_fusion_barrier_handles(self.fptr, barrier_handle_list)
         open_ar_fusion_data_handles(self.fptr, data_handle_list)
-        torch.cuda.synchronize(rank)
-        dist.barrier(group=group)
-
-    def get_workspace(self, ref: torch.Tensor):
-        return get_ar_fusion_workspace(self.fptr, ref)
+        self.barrier()
+        self.captured_inputs = []
+        self.is_capture = False
+        
+    def barrier(self):
+        torch.cuda.set_device(self.rank)
+        torch.cuda.synchronize(self.rank)
+        dist.barrier(group=self.group)
+    
+    def capture(self, input: torch.Tensor):
+        if torch.cuda.is_current_stream_capturing():
+            self.captured_inputs.append(input)
+            self.is_capture = True
+            return
+        if self.is_capture:
+            for x in self.captured_inputs:
+                handle = get_tensor_ipc_handle(x)
+                handle_list = [None] * self.world_size
+                dist.all_gather_object(handle_list, handle, group=self.group)
+                ar_fusion_capture(self.fptr, x, handle_list)
+            self.barrier()
 
     def __del__(self):
         if self.fptr:
@@ -95,8 +113,6 @@ class DistributedEnv:
         self.world_size = world_size
         self.group = dist.group.WORLD
         self.ar_fusion = ARFusion(group=self.group)
-        self.ref_tensor = torch.rand(1, dtype=dtype).cuda(rank)
-        self.workspace, self.comm_buf = self.ar_fusion.get_workspace(self.ref_tensor)
         self.barrier()
 
     def __del__(self):
@@ -106,9 +122,7 @@ class DistributedEnv:
             dist.destroy_process_group(None)
 
     def barrier(self):
-        torch.cuda.set_device(self.rank)
-        dist.barrier(self.group)
-        torch.cuda.synchronize()
+        self.ar_fusion.barrier()
 
     def allreduce_add_rms_native(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
@@ -141,6 +155,7 @@ class DistributedEnv:
     def allreduce_add_rms_fused(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
     ):
+        self.ar_fusion.capture(allreduce_in)
         residual_out = torch.empty_like(residual_in)
         norm_out = torch.empty_like(allreduce_in)
         if fp8_out:
@@ -154,8 +169,7 @@ class DistributedEnv:
         else:
             scale_out = torch.empty(1, dtype=torch.float32, device=allreduce_in.device)
         allreduce_rms(
-            self.rank,
-            self.world_size,
+            self.ar_fusion.fptr,
             allreduce_in,
             residual_in,
             rms_weight,
@@ -164,8 +178,6 @@ class DistributedEnv:
             scale_out,
             eps,
             fp8_policy_id if fp8_out else 0,
-            self.workspace,
-            self.comm_buf,
         )
         if fp8_out:
             return residual_out, norm_out, scale_out
