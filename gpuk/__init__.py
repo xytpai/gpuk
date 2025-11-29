@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 from typing import Tuple
+from contextlib import contextmanager
 
 
 this_dir = os.path.dirname(__file__)
@@ -21,7 +22,9 @@ get_ar_fusion_data_handle = eval(f"{prefix}.get_ar_fusion_data_handle")
 open_ar_fusion_barrier_handles = eval(f"{prefix}.open_ar_fusion_barrier_handles")
 open_ar_fusion_data_handles = eval(f"{prefix}.open_ar_fusion_data_handles")
 ar_fusion_capture = eval(f"{prefix}.ar_fusion_capture")
-get_tensor_ipc_handle = eval(f"{prefix}.get_tensor_ipc_handle")
+ar_fusion_capture_clear = eval(f"{prefix}.ar_fusion_capture_clear")
+get_ar_fusion_captured_handles = eval(f"{prefix}.get_ar_fusion_captured_handles")
+open_ar_fusion_captured_handles = eval(f"{prefix}.open_ar_fusion_captured_handles")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 
 
@@ -73,27 +76,40 @@ class ARFusion:
         open_ar_fusion_barrier_handles(self.fptr, barrier_handle_list)
         open_ar_fusion_data_handles(self.fptr, data_handle_list)
         self.barrier()
-        self.captured_inputs = []
-        self.is_capture = False
+        # self._IS_CAPTURING = False
+        self._IS_CAPTURED = False
         
     def barrier(self):
         torch.cuda.set_device(self.rank)
         torch.cuda.synchronize(self.rank)
         dist.barrier(group=self.group)
     
+    def consume_capture(self):
+        self.barrier()
+        handles, offsets = get_ar_fusion_captured_handles(self.fptr)
+        for idx in range(len(handles)):
+            handle_list = [None] * self.world_size
+            offset_list = [None] * self.world_size
+            dist.all_gather_object(handle_list, handles[idx], group=self.group)
+            dist.all_gather_object(offset_list, offsets[idx], group=self.group)
+            self.barrier()
+            open_ar_fusion_captured_handles(self.fptr, handle_list, offset_list, idx)
+        ar_fusion_capture_clear(self.fptr)
+        self.barrier()
+    
     def capture(self, input: torch.Tensor):
         if torch.cuda.is_current_stream_capturing():
-            self.captured_inputs.append(input)
-            self.is_capture = True
-            return
-        if self.is_capture:
-            for x in self.captured_inputs:
-                handle = get_tensor_ipc_handle(x)
-                handle_list = [None] * self.world_size
-                dist.all_gather_object(handle_list, handle, group=self.group)
-                ar_fusion_capture(self.fptr, x, handle_list)
-            self.barrier()
-
+            ar_fusion_capture(self.fptr, input)
+            self._IS_CAPTURED = True
+        else:
+            if self._IS_CAPTURED:
+                self.consume_capture()
+                self._IS_CAPTURED = False
+    
+    def force_capture(self, input: torch.Tensor):
+        ar_fusion_capture(self.fptr, input)
+        self.consume_capture()
+    
     def __del__(self):
         if self.fptr:
             destroy_ar_fusion(self.fptr)

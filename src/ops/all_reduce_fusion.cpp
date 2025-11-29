@@ -98,14 +98,48 @@ public:
         return cptrs;
     }
 
-    void capture(const Tensor &input, std::vector<Tensor> handles) {
-        void *ptr = (void *)input.data_ptr();
-        auto it = cached_ipc_data_.find(ptr);
-        if (it == cached_ipc_data_.end()) {
-            std::vector<void *> ipc_data;
-            ipc_details::open_handles(rank_, handles, ptr, ipc_data);
-            cached_ipc_data_[ptr] = ipc_data;
+    void capture(const Tensor &input) {
+        if (input.numel() * input.element_size() > 1024 * 4096 * 16) {
+            return;
         }
+        void *ptr = (void *)input.data_ptr();
+        void *base_ptr;
+        if (gpuPointerGetAttribute(&base_ptr, GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR, (gpuDeviceptr_t)ptr) != gpuSuccess) {
+            throw std::runtime_error("failed to get pointer attr");
+        }
+        cached_ptrs_.push_back(ptr);
+        cached_base_ptrs_.push_back(base_ptr);
+        cached_offsets_.push_back(((char *)ptr) - ((char *)base_ptr));
+    }
+
+    void capture_clear() {
+        cached_ptrs_.clear();
+        cached_base_ptrs_.clear();
+        cached_offsets_.clear();
+    }
+
+    std::tuple<std::vector<Tensor>, std::vector<int64_t>> get_captured_handles() {
+        int num_datas = cached_ptrs_.size();
+        std::vector<Tensor> ipc_handles;
+        std::vector<int64_t> offsets;
+        ipc_handles.reserve(num_datas);
+        offsets.reserve(num_datas);
+        for (int i = 0; i < num_datas; ++i) {
+            ipc_handles.push_back(ipc_details::get_handle(cached_base_ptrs_[i]));
+            offsets.push_back(cached_offsets_[i]);
+        }
+        return {ipc_handles, offsets};
+    }
+
+    void open_captured_handles(std::vector<Tensor> &handles, std::vector<int64_t> &offsets, int64_t ptr_idx) {
+        auto ptr = cached_ptrs_[ptr_idx];
+        auto base_ptr = cached_base_ptrs_[ptr_idx];
+        std::vector<void *> ipc_data;
+        ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
+        for (int i = 0; i < offsets.size(); ++i) {
+            ipc_data[i] = (void *)((char *)ipc_data[i] + offsets[i]);
+        }
+        cached_ipc_data_[ptr] = ipc_data;
     }
 
 private:
@@ -118,6 +152,10 @@ private:
     void *data_;
     std::vector<void *> ipc_barrier_flags_;
     std::vector<void *> ipc_data_;
+    // capture
+    std::vector<void *> cached_ptrs_;
+    std::vector<void *> cached_base_ptrs_;
+    std::vector<int64_t> cached_offsets_;
     std::unordered_map<void *, std::vector<void *>> cached_ipc_data_;
 };
 
@@ -160,14 +198,24 @@ void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles) {
     ptr->open_data_handles(handles);
 }
 
-void ar_fusion_capture(fptr_t fptr, const Tensor &input, std::vector<Tensor> handles) {
+void ar_fusion_capture(fptr_t fptr, const Tensor &input) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    ptr->capture(input, handles);
+    ptr->capture(input);
 }
 
-Tensor get_tensor_ipc_handle(const Tensor &input) {
-    void *ptr = (void *)input.data_ptr();
-    return ipc_details::get_handle(ptr);
+void ar_fusion_capture_clear(fptr_t fptr) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    ptr->capture_clear();
+}
+
+std::tuple<std::vector<Tensor>, std::vector<int64_t>> get_ar_fusion_captured_handles(fptr_t fptr) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    return ptr->get_captured_handles();
+}
+
+void open_ar_fusion_captured_handles(fptr_t fptr, std::vector<Tensor> handles, std::vector<int64_t> offsets, int64_t ptr_idx) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    ptr->open_captured_handles(handles, offsets, ptr_idx);
 }
 
 template <typename T>

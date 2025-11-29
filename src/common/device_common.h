@@ -13,6 +13,7 @@
 #include <time.h>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(__HIPCC__)
@@ -66,6 +67,9 @@
 #define gpuIpcGetMemHandle hipIpcGetMemHandle
 #define gpuIpcOpenMemHandle hipIpcOpenMemHandle
 #define gpuIpcMemLazyEnablePeerAccess hipIpcMemLazyEnablePeerAccess
+#define gpuPointerGetAttribute hipPointerGetAttribute
+#define GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR
+#define gpuDeviceptr_t hipDeviceptr_t
 
 #endif
 
@@ -120,6 +124,9 @@
 #define gpuIpcGetMemHandle cudaIpcGetMemHandle
 #define gpuIpcOpenMemHandle cudaIpcOpenMemHandle
 #define gpuIpcMemLazyEnablePeerAccess cudaIpcMemLazyEnablePeerAccess
+#define gpuPointerGetAttribute cudaPointerGetAttribute
+#define GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR CU_POINTER_ATTRIBUTE_RANGE_START_ADDR
+#define gpuDeviceptr_t cudaDeviceptr_t
 
 #endif
 

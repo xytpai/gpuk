@@ -16,8 +16,10 @@ Tensor get_ar_fusion_data_handle(fptr_t fptr);
 void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<Tensor> handles);
 void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles);
 
-void ar_fusion_capture(fptr_t fptr, const Tensor &input, std::vector<Tensor> handles);
-Tensor get_tensor_ipc_handle(const Tensor &input);
+void ar_fusion_capture(fptr_t fptr, const Tensor &input);
+void ar_fusion_capture_clear(fptr_t fptr);
+std::tuple<std::vector<Tensor>, std::vector<int64_t>> get_ar_fusion_captured_handles(fptr_t fptr);
+void open_ar_fusion_captured_handles(fptr_t fptr, std::vector<Tensor> handles, std::vector<int64_t> offsets, int64_t ptr_idx);
 
 void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
