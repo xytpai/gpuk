@@ -13,15 +13,18 @@ namespace details {
 
 static constexpr int kBytesPerAccess = 16;
 
+template <bool RELAXED = true>
 __device__ __forceinline__ void st_flag(int *addr, int flag) {
 #ifdef __CUDACC__
     asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(addr));
 #else
-    __scoped_atomic_store_n(addr, flag, __ATOMIC_RELEASE,
+    __scoped_atomic_store_n(addr, flag,
+                            RELAXED ? __ATOMIC_RELAXED : __ATOMIC_RELEASE,
                             __MEMORY_SCOPE_SYSTEM);
 #endif
 }
 
+template <bool RELAXED = true>
 __device__ __forceinline__ int ld_flag(int *addr) {
     int flag;
 #ifdef __CUDACC__
@@ -29,8 +32,9 @@ __device__ __forceinline__ int ld_flag(int *addr) {
                  : "=r"(flag)
                  : "l"(addr));
 #else
-    flag =
-        __scoped_atomic_load_n(addr, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+    flag = __scoped_atomic_load_n(addr,
+                                  RELAXED ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
+                                  __MEMORY_SCOPE_SYSTEM);
 #endif
     return flag;
 }
@@ -71,11 +75,12 @@ struct SyncComm {
         }
     }
 
+    template <bool RELAXED = true>
     __device__ __forceinline__ void sync() {
         auto flag = (*flag_ptr) + 1;
         if (threadIdx.x < NRanks) {
-            details::st_flag(target_flag, flag);
-            while (details::ld_flag(current_flag) < flag) {
+            details::st_flag<RELAXED>(target_flag, flag);
+            while (details::ld_flag<RELAXED>(current_flag) < flag) {
             }
         }
         __syncthreads();
