@@ -259,7 +259,7 @@ __global__ void allreduce_fusion_kernel_twoshot(AllReduceFusionParams<T> params,
     }
 }
 
-template <typename T, int NRanks, int BLOCK_SIZE>
+template <typename T, int NRanks, int BLOCK_SIZE, bool USE_EPILOGUE>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_w(AllReduceFusionParams<T> params, CommPtrs<NRanks> cptrs) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     constexpr int WARP_SIZE_ = BLOCK_SIZE / NRanks;
@@ -299,39 +299,21 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_w(AllRe
         val.store(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + idx);
     }
 
-    comm.template sync<false>();
-
-    constexpr int BLOCK_WORK_SIZE = NRanks * WARP_SIZE_ * VEC_SIZE;
-    int access_id_in_token = threadIdx.x * VEC_SIZE;
-    vec_t<T, VEC_SIZE> gamma;
-    gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
-    for (
-        int idx = blockIdx.x * params.hidden_dim + access_id_in_token, tidx = blockIdx.x;
-        idx < params.size;
-        idx += gridDim.x * NRanks * params.hidden_dim, tidx += gridDim.x) {
-        vec_t<T, VEC_SIZE> val;
-        val.load(reinterpret_cast<T *>(cptrs.data_ptrs[params.rank]) + idx);
-        epilogue<T, VEC_SIZE, true>(params, val, gamma, idx, tidx);
-    }
-}
-
-template <typename T, int NRanks, int LOOPS>
-__global__ void rms_kernel(AllReduceFusionParams<T> params, CommPtrs<NRanks> cptrs) {
-    static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-    int tidx = blockIdx.x;
-    int access_id_in_token = threadIdx.x * VEC_SIZE;
-    vec_t<T, VEC_SIZE> gamma;
-    gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
-
-#pragma unroll
-    for (int i = 0; i < LOOPS; ++i) {
-        int idx = tidx * params.hidden_dim + access_id_in_token;
-        if (idx < params.size) {
+    if constexpr (USE_EPILOGUE) {
+        comm.template sync<false>();
+        int access_id_in_token = threadIdx.x * VEC_SIZE;
+        vec_t<T, VEC_SIZE> gamma;
+        gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
+        for (
+            int idx = blockIdx.x * params.hidden_dim + access_id_in_token, tidx = blockIdx.x;
+            idx < params.size;
+            idx += gridDim.x * params.hidden_dim, tidx += gridDim.x) {
             vec_t<T, VEC_SIZE> val;
             val.load(reinterpret_cast<T *>(cptrs.data_ptrs[params.rank]) + idx);
             epilogue<T, VEC_SIZE, true>(params, val, gamma, idx, tidx);
         }
-        tidx += gridDim.x;
+    } else {
+        comm.sync();
     }
 }
 
@@ -367,10 +349,9 @@ void allreduce_fusion_kernel_w_launcher(
     assert(params.hidden_dim == HIDDEN_DIM);
     int token_num = params.size / params.hidden_dim;
     dim3 threadsPerBlock(BLOCK_SIZE);
-    constexpr int WARP_SIZE_ = BLOCK_SIZE / NRanks;
-    constexpr int BLOCK_WORK_SIZE = NRanks * WARP_SIZE_ * VEC_SIZE;
+    token_num = token_num <= 2 ? 1 : token_num;
     dim3 numBlocks(token_num);
-    allreduce_fusion_kernel_w<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
+    allreduce_fusion_kernel_w<T, NRanks, BLOCK_SIZE, true><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
 }
 
 template <typename T, int NRanks>
