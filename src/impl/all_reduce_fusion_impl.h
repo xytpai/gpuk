@@ -287,59 +287,68 @@ __global__ void allreduce_fusion_kernel_single_load(AllReduceFusionParams<T> par
     epilogue<T, VEC_SIZE>(params, residual, gamma, idx, tidx);
 }
 
-// template <typename T, int NRanks>
-// __global__ void allreduce_kernel(AllReduceFusionParams<T> params) {
-//     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-//     SyncComm<NRanks> comm(params.workspace, params.rank);
-//     int warp_id = threadIdx.x / WARP_SIZE;
-//     int lane_id = threadIdx.x % WARP_SIZE;
-//     __shared__ T shared[NRanks * WARP_SIZE * VEC_SIZE];
-//     int part = params.size / (VEC_SIZE * WARP_SIZE) / NRanks;
-//     comm.sync();
-//     for (int bid = blockIdx.x; bid < part; bid += gridDim.x) {
-//         int idx = ((params.rank * part + bid) * WARP_SIZE + lane_id) * VEC_SIZE;
-//         vec_t<T, VEC_SIZE> val;
-//         val.load(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + idx);
-//         val.store(&shared[0] + threadIdx.x * VEC_SIZE);
-//         __syncthreads();
-//         if (warp_id == 0) {
-//             vec_t<T, VEC_SIZE> acc, vec;
-//             acc.load(&shared[0] + lane_id * VEC_SIZE);
-// #pragma unroll
-//             for (int r = 1; r < NRanks; ++r) {
-//                 vec.load(&shared[0] + (r * WARP_SIZE + lane_id) * VEC_SIZE);
-//                 vec_add_<T, VEC_SIZE>(acc, vec);
-//             }
-//             acc.store(&shared[0] + lane_id * VEC_SIZE);
-//         }
-//         __syncthreads();
-//         val.load(&shared[0] + lane_id * VEC_SIZE);
-//         vec_t<T, VEC_SIZE> res;
-//         res.load(reinterpret_cast<T *>(params.residual_in) + idx);
-//         vec_add_<T, VEC_SIZE>(val, res);
-//         val.store(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + params.size + idx);
-//     }
-//     comm.sync();
-// }
+template <typename T, int NRanks>
+__global__ void __launch_bounds__(512, 1) allreduce_kernel(AllReduceFusionParams<T> params, CommPtrs<NRanks> cptrs) {
+    static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int WARP_SIZE_ = 512 / NRanks;
+    SyncComm<NRanks> comm(cptrs);
 
-// template <typename T, int NRanks, int LOOPS>
-// __global__ void rms_kernel(AllReduceFusionParams<T> params) {
-//     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-//     int tidx = blockIdx.x;
-//     int access_id_in_token = threadIdx.x * VEC_SIZE;
-//     vec_t<T, VEC_SIZE> gamma;
-//     gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
-// #pragma unroll
-//     for (int i = 0; i < LOOPS; ++i) {
-//         int idx = tidx * params.hidden_dim + access_id_in_token;
-//         if (idx < params.size) {
-//             vec_t<T, VEC_SIZE> val;
-//             val.load(reinterpret_cast<T *>(params.workspace[params.rank]) + params.size + idx);
-//             epilogue<T, VEC_SIZE, true>(params, val, gamma, idx, tidx);
-//         }
-//         tidx += gridDim.x;
-//     }
-// }
+    __shared__ T shared[NRanks * WARP_SIZE_ * VEC_SIZE];
+    int warp_id = threadIdx.x / WARP_SIZE_;
+    int lane_id = threadIdx.x % WARP_SIZE_;
+
+    comm.sync();
+
+    for (
+        int idx = ((blockIdx.x * NRanks + params.rank) * WARP_SIZE_ + lane_id) * VEC_SIZE;
+        // int idx = ((params.rank * gridDim.x + blockIdx.x) * WARP_SIZE_ + lane_id) * VEC_SIZE;
+        idx < params.size;
+        idx += gridDim.x * NRanks * WARP_SIZE_ * VEC_SIZE) {
+        vec_t<T, VEC_SIZE> val;
+        val.load(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + idx);
+        val.store(&shared[0] + threadIdx.x * VEC_SIZE);
+        __syncthreads();
+        if (warp_id == 0) {
+            vec_t<T, VEC_SIZE> acc;
+            acc.load(&shared[0] + lane_id * VEC_SIZE);
+#pragma unroll
+            for (int r = 1; r < NRanks; ++r) {
+                vec_t<T, VEC_SIZE> vec;
+                vec.load(&shared[0] + (r * WARP_SIZE_ + lane_id) * VEC_SIZE);
+                vec_add_<T, VEC_SIZE>(acc, vec);
+            }
+            acc.store(&shared[0] + lane_id * VEC_SIZE);
+        }
+        __syncthreads();
+        val.load(&shared[0] + lane_id * VEC_SIZE);
+        vec_t<T, VEC_SIZE> res;
+        res.load(reinterpret_cast<T *>(params.residual_in) + idx);
+        vec_add_<T, VEC_SIZE>(val, res);
+        val.store(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + idx);
+    }
+
+    comm.sync();
+}
+
+template <typename T, int NRanks, int LOOPS>
+__global__ void rms_kernel(AllReduceFusionParams<T> params, CommPtrs<NRanks> cptrs) {
+    static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    int tidx = blockIdx.x;
+    int access_id_in_token = threadIdx.x * VEC_SIZE;
+    vec_t<T, VEC_SIZE> gamma;
+    gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
+
+#pragma unroll
+    for (int i = 0; i < LOOPS; ++i) {
+        int idx = tidx * params.hidden_dim + access_id_in_token;
+        if (idx < params.size) {
+            vec_t<T, VEC_SIZE> val;
+            val.load(reinterpret_cast<T *>(cptrs.data_ptrs[params.rank]) + idx);
+            epilogue<T, VEC_SIZE, true>(params, val, gamma, idx, tidx);
+        }
+        tidx += gridDim.x;
+    }
+}
 
 template <typename T, int NRanks>
 void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
@@ -354,7 +363,15 @@ void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
     // void *args[] = {(void *)&params};
     if (token_num <= 1024) {
         dim3 numBlocks(token_num);
-        allreduce_fusion_kernel_single_load<T, NRanks, false><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
+        // allreduce_fusion_kernel_single_load<T, NRanks, false><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
+        dim3 threadsPerBlockAR(512);
+        constexpr int WARP_SIZE_ = 512 / NRanks;
+        constexpr int BLOCK_WORK_SIZE = NRanks * WARP_SIZE_ * VEC_SIZE;
+        int nblocks = (params.size + BLOCK_WORK_SIZE - 1) / BLOCK_WORK_SIZE;
+        nblocks = std::min(nblocks, 80);
+        dim3 numBlocksAR(nblocks);
+        allreduce_kernel<T, NRanks><<<numBlocksAR, threadsPerBlockAR, 0, stream>>>(params, cptrs);
+        rms_kernel<T, NRanks, 1><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
     } else {
         int nblocks = std::min((token_num + NRanks - 1) / NRanks, NBLOCKS_PER_GPU);
         if (params.size * sizeof(T) >= 1024 * 1024 * 128) {
