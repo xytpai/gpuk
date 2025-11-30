@@ -62,7 +62,6 @@ struct SyncComm {
     __device__ __forceinline__ SyncComm(CommPtrs<NRanks> &cptrs) {
 #pragma unroll
         for (int r = 0; r < NRanks; ++r) {
-            comm_bufs[r] = cptrs.data_ptrs[r];
             barrier_flags[r] = cptrs.barrier_flag_ptrs[r];
         }
         flag_ptr = ((int *)cptrs.sync_clock) + blockIdx.x;
@@ -90,7 +89,6 @@ struct SyncComm {
     }
 
     int *flag_ptr;
-    void *comm_bufs[NRanks];
     void *barrier_flags[NRanks];
     int *target_flag;
     int *current_flag;
@@ -201,7 +199,7 @@ __device__ __forceinline__ void epilogue(
     }
 }
 
-template <typename T, int NRanks, bool FETCH>
+template <typename T, int NRanks>
 __global__ void allreduce_fusion_kernel_twoshot(AllReduceFusionParams<T> params, CommPtrs<NRanks> cptrs) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
 
@@ -213,19 +211,6 @@ __global__ void allreduce_fusion_kernel_twoshot(AllReduceFusionParams<T> params,
     gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
 
     SyncComm<NRanks> comm(cptrs);
-
-    if constexpr (FETCH) {
-#pragma unroll
-        for (int r = 0; r < NRanks; ++r) {
-            for (int idx =
-                     (blockIdx.x * NRanks + r) * params.hidden_dim + access_id_in_token;
-                 idx < params.size; idx += gridDim.x * NRanks * params.hidden_dim) {
-                reinterpret_cast<float4 *>(comm.comm_bufs[params.rank])[idx / VEC_SIZE] =
-                    reinterpret_cast<float4 *>(params.allreduce_in)[idx / VEC_SIZE];
-            }
-        }
-    }
-
     comm.sync();
 
     // allreduce
@@ -234,16 +219,16 @@ __global__ void allreduce_fusion_kernel_twoshot(AllReduceFusionParams<T> params,
         vec_t<T, VEC_SIZE> vals[NRanks];
 #pragma unroll
         for (int r = 0; r < NRanks; ++r) {
-            vals[r].load(reinterpret_cast<T *>(comm.comm_bufs[r]) + idx);
+            vals[r].load(reinterpret_cast<T *>(cptrs.data_ptrs[r]) + idx);
         }
         vec_add_r_<T, VEC_SIZE, NRanks>(vals);
 #pragma unroll
         for (int r = 0; r < NRanks; ++r) {
-            vals[0].store(reinterpret_cast<T *>(comm.comm_bufs[r]) + params.size + idx);
+            vals[0].store(reinterpret_cast<T *>(cptrs.data_ptrs[r]) + params.size + idx);
         }
     }
 
-    comm.sync();
+    comm.template sync<false>();
 
 #pragma unroll
     for (int r = 0; r < NRanks; ++r) {
@@ -252,7 +237,7 @@ __global__ void allreduce_fusion_kernel_twoshot(AllReduceFusionParams<T> params,
              idx < params.size; idx += gridDim.x * NRanks * params.hidden_dim, tidx += gridDim.x * NRanks) {
             vec_t<T, VEC_SIZE> data[2];
             data[0].load(reinterpret_cast<T *>(params.residual_in) + idx);
-            data[1].load(reinterpret_cast<T *>(comm.comm_bufs[params.rank]) + params.size + idx);
+            data[1].load(reinterpret_cast<T *>(cptrs.data_ptrs[params.rank]) + params.size + idx);
             vec_add_<T, VEC_SIZE>(data[0], data[1]);
             epilogue<T, VEC_SIZE>(params, data[0], gamma, idx, tidx);
         }
@@ -277,7 +262,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_w(AllRe
         idx < params.size;
         idx += gridDim.x * NRanks * WARP_SIZE_ * VEC_SIZE) {
         vec_t<T, VEC_SIZE> val;
-        val.load(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + idx);
+        val.load(reinterpret_cast<T *>(cptrs.data_ptrs[warp_id]) + idx);
         val.store(&shared[0] + threadIdx.x * VEC_SIZE);
         __syncthreads();
         if (warp_id == 0) {
@@ -296,7 +281,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_w(AllRe
         vec_t<T, VEC_SIZE> res;
         res.load(reinterpret_cast<T *>(params.residual_in) + idx);
         vec_add_<T, VEC_SIZE>(val, res);
-        val.store(reinterpret_cast<T *>(comm.comm_bufs[warp_id]) + idx);
+        val.store(reinterpret_cast<T *>(cptrs.data_ptrs[warp_id]) + idx);
     }
 
     if constexpr (USE_EPILOGUE) {
@@ -334,7 +319,7 @@ void allreduce_fusion_kernel_twoshot_launcher(
     }
     // void *args[] = {(void *)&params};
     dim3 numBlocks(nblocks);
-    allreduce_fusion_kernel_twoshot<T, NRanks, false><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
+    allreduce_fusion_kernel_twoshot<T, NRanks><<<numBlocks, threadsPerBlock, 0, stream>>>(params, cptrs);
 }
 
 template <typename T, int NRanks, int HIDDEN_DIM>
