@@ -6,7 +6,7 @@ using namespace std;
 using namespace kernel_utils;
 namespace cg = cooperative_groups;
 
-#define WARP_SIZE 64
+#define WARP_SIZE 32
 #define NBLOCKS_PER_GPU 256
 
 namespace details {
