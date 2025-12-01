@@ -153,3 +153,4 @@ checkpoints/*.ckpt
 *.csv
 gpucore.*
 log
+*_logs

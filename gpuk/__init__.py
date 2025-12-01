@@ -26,6 +26,8 @@ ar_fusion_capture_clear = eval(f"{prefix}.ar_fusion_capture_clear")
 get_ar_fusion_captured_handles = eval(f"{prefix}.get_ar_fusion_captured_handles")
 open_ar_fusion_captured_handles = eval(f"{prefix}.open_ar_fusion_captured_handles")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
+fused_rope_rms = eval(f"{prefix}.fused_rope_rms")
+fused_mrope_3d_rms = eval(f"{prefix}.fused_mrope_3d_rms")
 
 
 fp8 = torch.float8_e4m3fnuz

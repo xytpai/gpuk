@@ -29,8 +29,16 @@ TORCH_LIBRARY(gpuk, m) {
     m.def("allreduce_rms(SymInt fptr, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
           "norm_out, Tensor scale_out, float eps, SymInt quant_type) -> ()");
+    m.def("fused_rope_rms(Tensor qkv, Tensor qw, Tensor kw, Tensor cos_sin, Tensor positions, "
+          "SymInt num_tokens, SymInt num_heads_q, SymInt num_heads_k, SymInt num_heads_v, SymInt head_size, "
+          "bool is_neox_style, float eps) -> ()");
+    m.def("fused_mrope_3d_rms(Tensor qkv, Tensor qw, Tensor kw, Tensor cos_sin, Tensor positions, "
+          "SymInt num_tokens, SymInt num_heads_q, SymInt num_heads_k, SymInt num_heads_v, SymInt head_size, "
+          "bool is_neox_style, int[] mrope_section_, bool is_interleaved, float eps) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
     m.impl("allreduce_rms", &allreduce_rms);
+    m.impl("fused_rope_rms", &fused_rope_rms);
+    m.impl("fused_mrope_3d_rms", &fused_mrope_3d_rms);
 }

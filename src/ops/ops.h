@@ -24,3 +24,9 @@ void open_ar_fusion_captured_handles(fptr_t fptr, std::vector<Tensor> handles, s
 void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
                    double eps, int64_t quant_type);
+void fused_rope_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Tensor &positions,
+                    int64_t num_tokens, int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, int64_t head_size,
+                    bool is_neox_style, double eps);
+void fused_mrope_3d_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Tensor &positions,
+                        int64_t num_tokens, int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, int64_t head_size,
+                        bool is_neox_style, std::vector<int64_t> mrope_section_, bool is_interleaved, double eps);
