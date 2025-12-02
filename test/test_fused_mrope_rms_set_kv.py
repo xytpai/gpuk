@@ -75,6 +75,7 @@ def run_torch_mrope_3d_rms_set_kv(
     mrope_section: List[int],
     is_interleaved: bool,
     eps: float,
+    q_out: Tensor,
     k_cache: Tensor, # contiguous (-1, num_heads_k, head_size)
     v_cache: Tensor, # contiguous (-1, num_heads_v, head_size)
     kv_loc: Tensor, # contiguous (num_tokens)
@@ -125,7 +126,8 @@ def run_torch_mrope_3d_rms_set_kv(
 
     k_cache[kv_loc] = (k.view(num_tokens, -1, head_size) / k_scale).to(k_cache.dtype)
     v_cache[kv_loc] = (v.view(num_tokens, -1, head_size) / v_scale).to(k_cache.dtype)
-    return q, k, v
+    q_out.copy_(q.view(q_out.shape))
+    return None
 
 
 @perftest()
@@ -144,6 +146,7 @@ def run_fused_mrope_3d_rms_set_kv(
     mrope_section: List[int],
     is_interleaved: bool,
     eps: float,
+    q_out: Tensor,
     k_cache: Tensor, # contiguous (-1, num_heads_k, head_size)
     v_cache: Tensor, # contiguous (-1, num_heads_v, head_size)
     kv_loc: Tensor, # contiguous (num_tokens)
@@ -166,20 +169,14 @@ def run_fused_mrope_3d_rms_set_kv(
         mrope_section,
         is_interleaved,
         eps,
+        q_out,
         k_cache,
         v_cache,
         kv_loc,
         k_scale,
         v_scale,
     )
-
-    q_size = num_heads_q * head_size
-    k_size = num_heads_k * head_size
-    v_size = num_heads_v * head_size
-
-    qkv = qkv.view(num_tokens, q_size + k_size + v_size)
-    q, k, v = qkv.split([q_size, k_size, v_size], dim=-1)
-    return q, k, v
+    return None
 
 
 @benchmark()
@@ -207,6 +204,8 @@ def test_mrope_3d_rms_set_kv(
         0, max_positions, (3, num_tokens), dtype=torch.int64, device="cuda"
     )
 
+    q_out_ref = torch.empty(num_tokens, num_heads_q, head_size, dtype=dtype, device="cuda")
+    q_out = torch.empty(num_tokens, num_heads_q, head_size, dtype=dtype, device="cuda")
     k_cache_ref = torch.rand(max_positions, num_heads_k, head_size, device="cuda").to(torch.float8_e4m3fn)
     v_cache_ref = torch.rand(max_positions, num_heads_v, head_size, device="cuda").to(torch.float8_e4m3fn)
     k_cache = k_cache_ref.clone()
@@ -217,7 +216,7 @@ def test_mrope_3d_rms_set_kv(
     k_scale = 1.5
     v_scale = 2.0
 
-    (q_ref, k_ref, v_ref), avg_torch = run_torch_mrope_3d_rms_set_kv(
+    _, avg_torch = run_torch_mrope_3d_rms_set_kv(
         qkv,
         qw,
         kw,
@@ -232,13 +231,14 @@ def test_mrope_3d_rms_set_kv(
         mrope_section,
         is_interleaved,
         eps,
+        q_out_ref,
         k_cache_ref,
         v_cache_ref,
         kv_loc,
         k_scale,
         v_scale,
     )
-    (q, k, v), avg_cu = run_fused_mrope_3d_rms_set_kv(
+    _, avg_cu = run_fused_mrope_3d_rms_set_kv(
         qkv,
         qw,
         kw,
@@ -253,6 +253,7 @@ def test_mrope_3d_rms_set_kv(
         mrope_section,
         is_interleaved,
         eps,
+        q_out,
         k_cache,
         v_cache,
         kv_loc,
@@ -265,9 +266,7 @@ def test_mrope_3d_rms_set_kv(
         f", mrope_section:{mrope_section}, is_interleaved:{is_interleaved}, eps:{eps}"
     )
     msg = f"[perf] === {info} === torch avg: {avg_torch:<8.2f} us, cu avg: {avg_cu:<8.2f} us, uplift: {avg_torch/avg_cu-1:<5.1%}"
-    checkAllclose(q_ref, q, msg="q", rtol=1e-2, atol=0.05)
-    checkAllclose(k_ref, k, msg="k", rtol=1e-2, atol=0.05)
-    checkAllclose(v_ref, v, msg=msg, rtol=1e-2, atol=0.05)
+    checkAllclose(q_out_ref, q_out, msg="q_out", rtol=1e-2, atol=0.05)
     checkAllclose(k_cache_ref[kv_loc].float(), k_cache[kv_loc].float(), msg="k_cache", rtol=1e-2, atol=0.05)
     checkAllclose(v_cache_ref[kv_loc].float(), v_cache[kv_loc].float(), msg="v_cache", rtol=1e-2, atol=0.05)
 

@@ -94,7 +94,7 @@ void fused_mrope_3d_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Te
 void fused_mrope_3d_rms_set_kv(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Tensor &positions,
                                int64_t num_tokens, int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, int64_t head_size,
                                bool is_neox_style, std::vector<int64_t> mrope_section_, bool is_interleaved, double eps,
-                               Tensor &k_cache, Tensor &v_cache, Tensor &kv_loc, double k_scale, double v_scale) {
+                               Tensor &q, Tensor &k_cache, Tensor &v_cache, Tensor &kv_loc, double k_scale, double v_scale) {
     TORCH_CHECK(mrope_section_.size() == 3);
     TORCH_CHECK(qkv.is_contiguous() && qw.is_contiguous() && kw.is_contiguous() && cos_sin.is_contiguous());
     TORCH_CHECK(k_cache.is_contiguous() && v_cache.is_contiguous() && kv_loc.is_contiguous());
@@ -132,6 +132,7 @@ void fused_mrope_3d_rms_set_kv(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_
                     eps,
                     mrope_section,
                     is_interleaved,
+                    (T *)q.data_ptr<scalar_t>(),
                     (T *)k_cache.data_ptr<scalar_t>(),
                     (T *)v_cache.data_ptr<scalar_t>(),
                     kv_loc.data_ptr<int64_t>(),
@@ -156,6 +157,7 @@ void fused_mrope_3d_rms_set_kv(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_
                     eps,
                     mrope_section,
                     is_interleaved,
+                    (T *)q.data_ptr<scalar_t>(),
                     (fp8e4m3fn *)k_cache.data_ptr(),
                     (fp8e4m3fn *)v_cache.data_ptr(),
                     kv_loc.data_ptr<int64_t>(),

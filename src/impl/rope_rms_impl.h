@@ -172,7 +172,7 @@ __global__ void fused_mrope_rms_neox_kernel(
     T *qkv, const T *q_w, const T *k_w, const T *cos_sin, const int64_t *positions, int64_t ps0, int64_t ps1,
     int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, double eps,
     std::array<int64_t, M> mrope_section, int64_t num_tokens, int64_t total_warps,
-    KVT *k_cache = nullptr, KVT *v_cache = nullptr, int64_t *kv_loc = nullptr, float k_scale = 1.0, float v_scale = 1.0) {
+    T *q = nullptr, KVT *k_cache = nullptr, KVT *v_cache = nullptr, int64_t *kv_loc = nullptr, float k_scale = 1.0, float v_scale = 1.0) {
     constexpr int VEC_SIZE = HEAD_SIZE / WARP_SIZE;
     constexpr int HALF_HEAD_SIZE = HEAD_SIZE / 2;
     const auto warp_id = threadIdx.x / WARP_SIZE;
@@ -235,6 +235,8 @@ __global__ void fused_mrope_rms_neox_kernel(
                 auto v_vec_fp8 = convert_to<T, VEC_SIZE, fp8e4m3fn>(v_vec, v_scale);
                 v_vec_fp8.store(v_cache + offset);
             }
+            auto q_ = q + (token_id * num_heads_q + head_id_in_token) * HEAD_SIZE;
+            out_vec.store(q_ + access_id_in_head);
         } else {
             auto offset = (kv_loc[token_id] * num_heads_k + head_id_in_token - num_heads_q) * HEAD_SIZE + access_id_in_head;
             if constexpr (std::is_same_v<T, KVT>) {
@@ -244,9 +246,9 @@ __global__ void fused_mrope_rms_neox_kernel(
                 out_vec_fp8.store(k_cache + offset);
             }
         }
+    } else {
+        out_vec.store(qkv_ + access_id_in_head);
     }
-
-    out_vec.store(qkv_ + access_id_in_head);
 }
 
 template <typename T, int HEAD_SIZE, bool IS_MROPE, bool IS_INTERLEAVED, int M, bool SET_KV_CACHE = false, typename KVT = T>
@@ -254,7 +256,7 @@ __global__ void fused_mrope_rms_noneox_kernel(
     T *qkv, const T *q_w, const T *k_w, const T *cos_sin, const int64_t *positions, int64_t ps0, int64_t ps1,
     int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, double eps,
     std::array<int64_t, M> mrope_section, int64_t num_tokens, int64_t total_warps,
-    KVT *k_cache = nullptr, KVT *v_cache = nullptr, int64_t *kv_loc = nullptr, float k_scale = 1.0, float v_scale = 1.0) {
+    T *q = nullptr, KVT *k_cache = nullptr, KVT *v_cache = nullptr, int64_t *kv_loc = nullptr, float k_scale = 1.0, float v_scale = 1.0) {
     constexpr int VEC_SIZE = HEAD_SIZE / WARP_SIZE;
     constexpr int HALF_HEAD_SIZE = HEAD_SIZE / 2;
     const auto warp_id = threadIdx.x / WARP_SIZE;
@@ -312,6 +314,8 @@ __global__ void fused_mrope_rms_noneox_kernel(
                 auto v_vec_fp8 = convert_to<T, VEC_SIZE, fp8e4m3fn>(v_vec, v_scale);
                 v_vec_fp8.store(v_cache + offset);
             }
+            auto q_ = q + (token_id * num_heads_q + head_id_in_token) * HEAD_SIZE;
+            out_vec.store(q_ + access_id_in_head);
         } else {
             auto offset = (kv_loc[token_id] * num_heads_k + head_id_in_token - num_heads_q) * HEAD_SIZE + access_id_in_head;
             if constexpr (std::is_same_v<T, KVT>) {
@@ -321,9 +325,9 @@ __global__ void fused_mrope_rms_noneox_kernel(
                 out_vec_fp8.store(k_cache + offset);
             }
         }
+    } else {
+        out_vec.store(qkv_ + access_id_in_head);
     }
-
-    out_vec.store(qkv_ + access_id_in_head);
 }
 
 template <typename T>
@@ -420,7 +424,7 @@ void fused_mrope_rms_set_kv(
     T *qkv, const T *q_w, const T *k_w, const T *cos_sin, const int64_t *positions, int64_t ps0, int64_t ps1,
     int64_t num_tokens, int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, int64_t head_size,
     bool is_neox_style, double eps, std::array<int64_t, M> mrope_section, bool is_interleaved,
-    KVT *k_cache, KVT *v_cache, int64_t *kv_loc, float k_scale, float v_scale, gpuStream_t stream) {
+    T *q, KVT *k_cache, KVT *v_cache, int64_t *kv_loc, float k_scale, float v_scale, gpuStream_t stream) {
     assert(head_size == 64 || head_size == 128 || head_size == 256);
     assert(num_heads_q == num_heads_v);
     auto dim = std::accumulate(mrope_section.begin(), mrope_section.end(), 0);
@@ -435,11 +439,11 @@ void fused_mrope_rms_set_kv(
     if (is_neox_style) {                                                                                                                     \
         fused_mrope_rms_neox_kernel<T, HEAD_SIZE, true, IS_INTERLEAVED, M, true, KVT><<<numBlocks, threadsPerBlock, 0, stream>>>(            \
             qkv, q_w, k_w, cos_sin, positions, ps0, ps1, num_heads_q, num_heads_k, num_heads_v, eps, mrope_section, num_tokens, total_warps, \
-            k_cache, v_cache, kv_loc, k_scale, v_scale);                                                                                     \
+            q, k_cache, v_cache, kv_loc, k_scale, v_scale);                                                                                  \
     } else {                                                                                                                                 \
         fused_mrope_rms_noneox_kernel<T, HEAD_SIZE, true, IS_INTERLEAVED, M, true, KVT><<<numBlocks, threadsPerBlock, 0, stream>>>(          \
             qkv, q_w, k_w, cos_sin, positions, ps0, ps1, num_heads_q, num_heads_k, num_heads_v, eps, mrope_section, num_tokens, total_warps, \
-            k_cache, v_cache, kv_loc, k_scale, v_scale);                                                                                     \
+            q, k_cache, v_cache, kv_loc, k_scale, v_scale);                                                                                  \
     }
 
     if (is_interleaved) {
