@@ -28,6 +28,7 @@ open_ar_fusion_captured_handles = eval(f"{prefix}.open_ar_fusion_captured_handle
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 fused_rope_rms = eval(f"{prefix}.fused_rope_rms")
 fused_mrope_3d_rms = eval(f"{prefix}.fused_mrope_3d_rms")
+fused_mrope_3d_rms_set_kv = eval(f"{prefix}.fused_mrope_3d_rms_set_kv")
 
 
 fp8 = torch.float8_e4m3fnuz
