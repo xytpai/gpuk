@@ -37,9 +37,10 @@ void open_handles(int rank, std::vector<Tensor> &handles, void *ptr, std::vector
 
 class CommWorkspace {
 public:
-    CommWorkspace(int64_t rank, int64_t world_size, int64_t size_in_bytes, int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
+    CommWorkspace(int64_t device_id, int64_t rank, int64_t world_size, int64_t size_in_bytes, int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
         TORCH_CHECK(rank < world_size);
-        gpuSetDevice(rank);
+        gpuSetDevice(device_id);
+        device_id_ = device_id;
         rank_ = rank;
         world_size_ = world_size;
         size_in_bytes_ = size_in_bytes;
@@ -118,17 +119,26 @@ public:
         cached_offsets_.clear();
     }
 
-    std::tuple<std::vector<Tensor>, std::vector<int64_t>> get_captured_handles() {
+    std::vector<Tensor> get_captured_handles() {
         int num_datas = cached_ptrs_.size();
         std::vector<Tensor> ipc_handles;
-        std::vector<int64_t> offsets;
         ipc_handles.reserve(num_datas);
-        offsets.reserve(num_datas);
         for (int i = 0; i < num_datas; ++i) {
             ipc_handles.push_back(ipc_details::get_handle(cached_base_ptrs_[i]));
+        }
+        return ipc_handles;
+    }
+
+    Tensor get_captured_offsets() {
+        int num_datas = cached_ptrs_.size();
+        std::vector<int64_t> offsets;
+        offsets.reserve(num_datas);
+        for (int i = 0; i < num_datas; ++i) {
             offsets.push_back(cached_offsets_[i]);
         }
-        return {ipc_handles, offsets};
+        auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+        auto t = torch::tensor(offsets, options);
+        return t;
     }
 
     void open_captured_handles(std::vector<Tensor> &handles, std::vector<int64_t> &offsets, int64_t ptr_idx) {
@@ -143,6 +153,7 @@ public:
     }
 
 private:
+    int device_id_;
     int rank_;
     int world_size_;
     int size_in_bytes_;
@@ -159,7 +170,7 @@ private:
     std::unordered_map<void *, std::vector<void *>> cached_ipc_data_;
 };
 
-fptr_t init_ar_fusion(int64_t rank, int64_t world_size, int64_t max_size_in_bytes) {
+fptr_t init_ar_fusion(int64_t device_id, int64_t rank, int64_t world_size, int64_t max_size_in_bytes) {
     switch (world_size) {
     case 8:
     case 4:
@@ -170,7 +181,7 @@ fptr_t init_ar_fusion(int64_t rank, int64_t world_size, int64_t max_size_in_byte
     }
     if (rank < 0 || rank >= world_size)
         throw std::invalid_argument("invalid rank passed in");
-    return (fptr_t) new CommWorkspace(rank, world_size, max_size_in_bytes);
+    return (fptr_t) new CommWorkspace(device_id, rank, world_size, max_size_in_bytes);
 }
 
 void destroy_ar_fusion(fptr_t fptr) {
@@ -208,9 +219,14 @@ void ar_fusion_capture_clear(fptr_t fptr) {
     ptr->capture_clear();
 }
 
-std::tuple<std::vector<Tensor>, std::vector<int64_t>> get_ar_fusion_captured_handles(fptr_t fptr) {
+std::vector<Tensor> get_ar_fusion_captured_handles(fptr_t fptr) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
     return ptr->get_captured_handles();
+}
+
+Tensor get_ar_fusion_captured_offsets(fptr_t fptr) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    return ptr->get_captured_offsets();
 }
 
 void open_ar_fusion_captured_handles(fptr_t fptr, std::vector<Tensor> handles, std::vector<int64_t> offsets, int64_t ptr_idx) {

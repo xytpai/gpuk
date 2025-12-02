@@ -24,6 +24,7 @@ open_ar_fusion_data_handles = eval(f"{prefix}.open_ar_fusion_data_handles")
 ar_fusion_capture = eval(f"{prefix}.ar_fusion_capture")
 ar_fusion_capture_clear = eval(f"{prefix}.ar_fusion_capture_clear")
 get_ar_fusion_captured_handles = eval(f"{prefix}.get_ar_fusion_captured_handles")
+get_ar_fusion_captured_offsets = eval(f"{prefix}.get_ar_fusion_captured_offsets")
 open_ar_fusion_captured_handles = eval(f"{prefix}.open_ar_fusion_captured_handles")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 fused_rope_rms = eval(f"{prefix}.fused_rope_rms")
@@ -47,59 +48,61 @@ fp8_policy_id_ = {
 fp8_policy_id = fp8_policy_id_[fp8]
 
 
-class ARFusion:
+class GPUKDistEnv:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
 
     def __init__(
         self,
         group: ProcessGroup = None,
+        device_id: int = None,
         max_size_in_bytes=16384 * 16384,
+        dtype: torch.dtype=torch.bfloat16,
     ) -> None:
         self.group = group
-        rank = dist.get_rank(group=self.group)
-        torch.cuda.set_device(rank)
-        self.rank = rank
+        self.device_id = device_id
+        self.rank = dist.get_rank(group=self.group)
+        self.world_size = dist.get_world_size(group=self.group)
         self.fptr = None
-        world_size = dist.get_world_size(group=self.group)
-        self.world_size = world_size
-        if world_size == 1:
+        torch.cuda.set_device(self.device_id)
+        
+        if self.world_size == 1:
             return
 
-        if world_size not in ARFusion._SUPPORTED_WORLD_SIZES:
+        if self.world_size not in GPUKDistEnv._SUPPORTED_WORLD_SIZES:
             return
 
-        torch.cuda.set_device(rank)
-        self.fptr = init_ar_fusion(rank, world_size, max_size_in_bytes)
+        self.fptr = init_ar_fusion(self.device_id, self.rank, self.world_size, max_size_in_bytes)
         barrier_handle = get_ar_fusion_barrier_handle(self.fptr)
         data_handle = get_ar_fusion_data_handle(self.fptr)
-        barrier_handle_list = [None] * world_size
-        data_handle_list = [None] * world_size
+        self.barrier()
+        barrier_handle_list = [None] * self.world_size
+        data_handle_list = [None] * self.world_size
         dist.all_gather_object(barrier_handle_list, barrier_handle, group=self.group)
         dist.all_gather_object(data_handle_list, data_handle, group=self.group)
         open_ar_fusion_barrier_handles(self.fptr, barrier_handle_list)
         open_ar_fusion_data_handles(self.fptr, data_handle_list)
         self.barrier()
-        # self._IS_CAPTURING = False
         self._IS_CAPTURED = False
-        
+
     def barrier(self):
-        torch.cuda.set_device(self.rank)
-        torch.cuda.synchronize(self.rank)
+        torch.cuda.set_device(self.device_id)
+        torch.cuda.synchronize(self.device_id)
         dist.barrier(group=self.group)
-    
+
     def consume_capture(self):
         self.barrier()
-        handles, offsets = get_ar_fusion_captured_handles(self.fptr)
+        handles = get_ar_fusion_captured_handles(self.fptr)
+        offsets = get_ar_fusion_captured_offsets(self.fptr)
         for idx in range(len(handles)):
             handle_list = [None] * self.world_size
             offset_list = [None] * self.world_size
             dist.all_gather_object(handle_list, handles[idx], group=self.group)
-            dist.all_gather_object(offset_list, offsets[idx], group=self.group)
+            dist.all_gather_object(offset_list, int(offsets[idx].item()), group=self.group)
             self.barrier()
             open_ar_fusion_captured_handles(self.fptr, handle_list, offset_list, idx)
         ar_fusion_capture_clear(self.fptr)
         self.barrier()
-    
+
     def capture(self, input: torch.Tensor):
         if torch.cuda.is_current_stream_capturing():
             ar_fusion_capture(self.fptr, input)
@@ -108,40 +111,14 @@ class ARFusion:
             if self._IS_CAPTURED:
                 self.consume_capture()
                 self._IS_CAPTURED = False
-    
+
     def force_capture(self, input: torch.Tensor):
         ar_fusion_capture(self.fptr, input)
         self.consume_capture()
-    
+
     def __del__(self):
         if self.fptr:
             destroy_ar_fusion(self.fptr)
-
-
-class DistributedEnv:
-    def __init__(self, rank, world_size, dtype=torch.bfloat16, init_process_group=False, port=23339):
-        torch.cuda.set_device(rank)
-        if init_process_group:
-            dist.init_process_group(
-                backend="nccl",
-                init_method=f"tcp://127.0.0.1:{port}",
-                rank=rank,
-                world_size=world_size,
-            )
-        self.rank = rank
-        self.world_size = world_size
-        self.group = dist.group.WORLD
-        self.ar_fusion = ARFusion(group=self.group)
-        self.barrier()
-
-    def __del__(self):
-        if getattr(self, 'group', None):
-            dist.destroy_process_group(self.group)
-        else:
-            dist.destroy_process_group(None)
-
-    def barrier(self):
-        self.ar_fusion.barrier()
 
     def allreduce_add_rms_native(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
@@ -152,7 +129,7 @@ class DistributedEnv:
             x = x * torch.rsqrt(variance + eps)
             x = x.to(input_dtype)
             return weight * x
-        dist.all_reduce(allreduce_in)
+        dist.all_reduce(allreduce_in, group=self.group)
         residual_out = allreduce_in + residual_in
         norm_out = rms_norm_forward(residual_out, rms_weight, eps)
         if fp8_out:
@@ -174,7 +151,7 @@ class DistributedEnv:
     def allreduce_add_rms_fused(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
     ):
-        self.ar_fusion.capture(allreduce_in)
+        self.capture(allreduce_in)
         residual_out = torch.empty_like(residual_in)
         norm_out = torch.empty_like(allreduce_in)
         if fp8_out:
@@ -188,7 +165,7 @@ class DistributedEnv:
         else:
             scale_out = torch.empty(1, dtype=torch.float32, device=allreduce_in.device)
         allreduce_rms(
-            self.ar_fusion.fptr,
+            self.fptr,
             allreduce_in,
             residual_in,
             rms_weight,
