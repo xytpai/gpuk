@@ -83,6 +83,7 @@ class GPUKDistEnv:
         open_ar_fusion_data_handles(self.fptr, data_handle_list)
         self.barrier()
         self._IS_CAPTURING = False
+        self._IS_CAPTURED = False
         self.disabled = False
 
     def barrier(self):
@@ -113,6 +114,15 @@ class GPUKDistEnv:
             self._IS_CAPTURING = False
             if not self.disabled:
                 self.consume_capture()
+    
+    def capture_(self, input: torch.Tensor):
+        if torch.cuda.is_current_stream_capturing():
+            pass
+            self._IS_CAPTURED = True
+        else:
+            if self._IS_CAPTURED:
+                self.consume_capture()
+                self._IS_CAPTURED = False
 
     def __del__(self):
         if self.fptr:
@@ -149,6 +159,7 @@ class GPUKDistEnv:
     def allreduce_add_rms_fused(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
     ):
+        self.capture_(allreduce_in)
         residual_out = torch.empty_like(residual_in)
         if fp8_out:
             norm_out = torch.empty_like(allreduce_in, dtype=fp8)
