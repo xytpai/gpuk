@@ -33,29 +33,45 @@ void open_handles(int rank, std::vector<Tensor> &handles, void *ptr, std::vector
     }
 }
 
+void create_base_ptr(void **base_ptr, void *ptr) {
+    if (gpuPointerGetAttribute(base_ptr, GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR, (gpuDeviceptr_t)ptr) != gpuSuccess) {
+        throw std::runtime_error("failed to get pointer attr");
+    }
+}
+
 } // namespace ipc_details
 
 class CommWorkspace {
 public:
-    CommWorkspace(int64_t device_id, int64_t rank, int64_t world_size, int64_t size_in_bytes, int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
+    CommWorkspace(
+        int64_t device_id,         // assign device
+        int64_t rank,              // rank in group
+        int64_t world_size,        // group size
+        int64_t size_in_bytes,     // private data size
+        int64_t comm_ptrs_buf_len, // cached ptrs size
+        int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
         TORCH_CHECK(rank < world_size);
         gpuSetDevice(device_id);
         device_id_ = device_id;
         rank_ = rank;
         world_size_ = world_size;
         size_in_bytes_ = size_in_bytes;
+        comm_ptrs_buf_len_ = comm_ptrs_buf_len;
         max_thread_blocks_ = max_thread_blocks;
         gpuMalloc(&sync_clock_, max_thread_blocks_ * sizeof(int));
         gpuMalloc(&barrier_flags_, max_thread_blocks_ * world_size_ * sizeof(int));
         gpuMalloc(&data_, size_in_bytes_ * 2);
+        gpuMalloc(&comm_ptrs_, comm_ptrs_buf_len_ * sizeof(CommPtrs));
         gpuMemset(sync_clock_, 0, max_thread_blocks_ * sizeof(int));
         gpuMemset(barrier_flags_, 0, max_thread_blocks_ * world_size_ * sizeof(int));
+        used_comm_ptrs_ = 0;
     }
 
     ~CommWorkspace() {
         gpuFree(sync_clock_);
         gpuFree(barrier_flags_);
         gpuFree(data_);
+        gpuFree(comm_ptrs_);
     }
 
     Tensor get_barrier_handle() {
@@ -72,69 +88,72 @@ public:
 
     void open_data_handles(std::vector<Tensor> handles) {
         ipc_details::open_handles(rank_, handles, data_, ipc_data_);
+        CommPtrs cptrs;
+        for (int i = 0; i < world_size_; ++i) {
+            cptrs.data_ptrs[i] = ipc_data_[i];
+        }
+        gpuMemcpy(comm_ptrs_ + 0, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        used_comm_ptrs_ = 1;
     }
 
-    HostCommPtrs get_cptrs(const Tensor &input, gpuStream_t stream) {
-        HostCommPtrs cptrs;
-        cptrs.data_ptrs.resize(world_size_);
-        cptrs.barrier_flag_ptrs.resize(world_size_);
+    std::tuple<CommMeta, CommPtrs *> get_comm_data(const Tensor &input, gpuStream_t stream) {
+        int64_t size = input.numel() * input.element_size();
         void *ptr = (void *)input.data_ptr();
-        auto it = cached_ipc_data_.find(ptr);
-        if (it != cached_ipc_data_.end()) {
-            for (int r = 0; r < world_size_; ++r) {
-                cptrs.data_ptrs[r] = (it->second)[r];
-            }
-        } else {
-            gpuMemcpyAsync(data_, ptr, input.numel() * input.element_size(), gpuMemcpyDeviceToDevice, stream);
-            for (int r = 0; r < world_size_; ++r) {
-                cptrs.data_ptrs[r] = ipc_data_[r];
-            }
-        }
+
+        CommMeta meta;
         for (int r = 0; r < world_size_; ++r) {
-            cptrs.barrier_flag_ptrs[r] = ipc_barrier_flags_[r];
+            meta.barrier_flag_ptrs[r] = ipc_barrier_flags_[r];
         }
-        cptrs.sync_clock = sync_clock_;
-        cptrs.rank = rank_;
-        cptrs.nranks = world_size_;
-        return cptrs;
-    }
+        meta.sync_clock = sync_clock_;
+        meta.rank = rank_;
+        meta.nranks = world_size_;
 
-    void capture(const Tensor &input) {
-        if (input.numel() * input.element_size() > 1024 * 4096 * 16) {
-            return;
+        CommPtrs *cptrs;
+        auto it = ptr_to_comm_ptrs_.find(ptr);
+        if (it != ptr_to_comm_ptrs_.end()) {
+            cptrs = it->second;
+        } else {
+            gpuStreamCaptureStatus status;
+            gpuStreamIsCapturing(stream, &status);
+            if (status == gpuStreamCaptureStatusActive && size < 1024 * 4096 * 16) {
+                unregistered_ptrs_.push_back(ptr);
+                cptrs = comm_ptrs_ + used_comm_ptrs_ + unregistered_ptrs_.size() - 1;
+            } else {
+                cptrs = comm_ptrs_ + 0;
+                gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
+            }
         }
-        void *ptr = (void *)input.data_ptr();
-        void *base_ptr;
-        if (gpuPointerGetAttribute(&base_ptr, GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR, (gpuDeviceptr_t)ptr) != gpuSuccess) {
-            throw std::runtime_error("failed to get pointer attr");
-        }
-        cached_ptrs_.push_back(ptr);
-        cached_base_ptrs_.push_back(base_ptr);
-        cached_offsets_.push_back(((char *)ptr) - ((char *)base_ptr));
+
+        return {meta, cptrs};
     }
 
     void capture_clear() {
-        cached_ptrs_.clear();
-        cached_base_ptrs_.clear();
-        cached_offsets_.clear();
+        unregistered_ptrs_.clear();
     }
 
     std::vector<Tensor> get_captured_handles() {
-        int num_datas = cached_ptrs_.size();
+        int num_datas = unregistered_ptrs_.size();
         std::vector<Tensor> ipc_handles;
         ipc_handles.reserve(num_datas);
         for (int i = 0; i < num_datas; ++i) {
-            ipc_handles.push_back(ipc_details::get_handle(cached_base_ptrs_[i]));
+            void *ptr = unregistered_ptrs_[i];
+            void *base_ptr;
+            ipc_details::create_base_ptr(&base_ptr, ptr);
+            ipc_handles.push_back(ipc_details::get_handle(base_ptr));
         }
         return ipc_handles;
     }
 
     Tensor get_captured_offsets() {
-        int num_datas = cached_ptrs_.size();
+        int num_datas = unregistered_ptrs_.size();
         std::vector<int64_t> offsets;
         offsets.reserve(num_datas);
         for (int i = 0; i < num_datas; ++i) {
-            offsets.push_back(cached_offsets_[i]);
+            void *ptr = unregistered_ptrs_[i];
+            void *base_ptr;
+            ipc_details::create_base_ptr(&base_ptr, ptr);
+            int64_t offset = ((char *)ptr) - ((char *)base_ptr);
+            offsets.push_back(offset);
         }
         auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
         auto t = torch::tensor(offsets, options);
@@ -142,14 +161,19 @@ public:
     }
 
     void open_captured_handles(std::vector<Tensor> &handles, std::vector<int64_t> &offsets, int64_t ptr_idx) {
-        auto ptr = cached_ptrs_[ptr_idx];
-        auto base_ptr = cached_base_ptrs_[ptr_idx];
+        auto ptr = unregistered_ptrs_[ptr_idx];
+        void *base_ptr;
+        ipc_details::create_base_ptr(&base_ptr, ptr);
         std::vector<void *> ipc_data;
         ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
+        CommPtrs cptrs;
         for (int i = 0; i < offsets.size(); ++i) {
             ipc_data[i] = (void *)((char *)ipc_data[i] + offsets[i]);
+            cptrs.data_ptrs[i] = ipc_data[i];
         }
-        cached_ipc_data_[ptr] = ipc_data;
+        gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        ptr_to_comm_ptrs_[ptr] = comm_ptrs_ + used_comm_ptrs_;
+        used_comm_ptrs_++;
     }
 
 private:
@@ -157,20 +181,21 @@ private:
     int rank_;
     int world_size_;
     int size_in_bytes_;
+    int comm_ptrs_buf_len_;
     int max_thread_blocks_;
     void *sync_clock_;
     void *barrier_flags_;
     void *data_;
     std::vector<void *> ipc_barrier_flags_;
     std::vector<void *> ipc_data_;
-    // capture
-    std::vector<void *> cached_ptrs_;
-    std::vector<void *> cached_base_ptrs_;
-    std::vector<int64_t> cached_offsets_;
-    std::unordered_map<void *, std::vector<void *>> cached_ipc_data_;
+    // graph
+    std::vector<void *> unregistered_ptrs_;
+    CommPtrs *comm_ptrs_;
+    int used_comm_ptrs_;
+    std::unordered_map<void *, CommPtrs *> ptr_to_comm_ptrs_;
 };
 
-fptr_t init_ar_fusion(int64_t device_id, int64_t rank, int64_t world_size, int64_t max_size_in_bytes) {
+fptr_t init_ar_fusion(int64_t device_id, int64_t rank, int64_t world_size, int64_t max_size_in_bytes, int64_t comm_ptrs_buf_len) {
     switch (world_size) {
     case 8:
     case 4:
@@ -181,7 +206,7 @@ fptr_t init_ar_fusion(int64_t device_id, int64_t rank, int64_t world_size, int64
     }
     if (rank < 0 || rank >= world_size)
         throw std::invalid_argument("invalid rank passed in");
-    return (fptr_t) new CommWorkspace(device_id, rank, world_size, max_size_in_bytes);
+    return (fptr_t) new CommWorkspace(device_id, rank, world_size, max_size_in_bytes, comm_ptrs_buf_len);
 }
 
 void destroy_ar_fusion(fptr_t fptr) {
@@ -207,11 +232,6 @@ void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<Tensor> handles) {
 void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
     ptr->open_data_handles(handles);
-}
-
-void ar_fusion_capture(fptr_t fptr, const Tensor &input) {
-    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    ptr->capture(input);
 }
 
 void ar_fusion_capture_clear(fptr_t fptr) {
@@ -265,7 +285,7 @@ void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
     int size = allreduce_in.numel();
     int hidden_dim = allreduce_in.size(-1);
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    auto cptrs = ptr->get_cptrs(allreduce_in, stream);
+    auto comm_data = ptr->get_comm_data(allreduce_in, stream);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         kHalf,
         kBFloat16,
@@ -273,7 +293,8 @@ void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
         "allreduce_rms", [&] {
             using k_scalar_t = KernelElementType<scalar_t>::type;
             allreduce_rms_fusion_impl<k_scalar_t>(
-                cptrs,
+                std::get<0>(comm_data),
+                std::get<1>(comm_data),
                 size,
                 hidden_dim,
                 (void *)allreduce_in.data_ptr<scalar_t>(),

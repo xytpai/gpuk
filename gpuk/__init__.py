@@ -21,7 +21,6 @@ get_ar_fusion_barrier_handle = eval(f"{prefix}.get_ar_fusion_barrier_handle")
 get_ar_fusion_data_handle = eval(f"{prefix}.get_ar_fusion_data_handle")
 open_ar_fusion_barrier_handles = eval(f"{prefix}.open_ar_fusion_barrier_handles")
 open_ar_fusion_data_handles = eval(f"{prefix}.open_ar_fusion_data_handles")
-ar_fusion_capture = eval(f"{prefix}.ar_fusion_capture")
 ar_fusion_capture_clear = eval(f"{prefix}.ar_fusion_capture_clear")
 get_ar_fusion_captured_handles = eval(f"{prefix}.get_ar_fusion_captured_handles")
 get_ar_fusion_captured_offsets = eval(f"{prefix}.get_ar_fusion_captured_offsets")
@@ -56,6 +55,7 @@ class GPUKDistEnv:
         group: ProcessGroup = None,
         device_id: int = None,
         max_size_in_bytes=16384 * 16384,
+        comm_ptrs_buf_len=1024 * 256,
         dtype: torch.dtype=torch.bfloat16,
     ) -> None:
         self.group = group
@@ -71,7 +71,7 @@ class GPUKDistEnv:
         if self.world_size not in GPUKDistEnv._SUPPORTED_WORLD_SIZES:
             return
 
-        self.fptr = init_ar_fusion(self.device_id, self.rank, self.world_size, max_size_in_bytes)
+        self.fptr = init_ar_fusion(self.device_id, self.rank, self.world_size, max_size_in_bytes, comm_ptrs_buf_len)
         barrier_handle = get_ar_fusion_barrier_handle(self.fptr)
         data_handle = get_ar_fusion_data_handle(self.fptr)
         self.barrier()
@@ -82,7 +82,8 @@ class GPUKDistEnv:
         open_ar_fusion_barrier_handles(self.fptr, barrier_handle_list)
         open_ar_fusion_data_handles(self.fptr, data_handle_list)
         self.barrier()
-        self._IS_CAPTURED = False
+        self._IS_CAPTURING = False
+        self.disabled = False
 
     def barrier(self):
         torch.cuda.set_device(self.device_id)
@@ -102,19 +103,16 @@ class GPUKDistEnv:
             open_ar_fusion_captured_handles(self.fptr, handle_list, offset_list, idx)
         ar_fusion_capture_clear(self.fptr)
         self.barrier()
-
-    def capture(self, input: torch.Tensor):
-        if torch.cuda.is_current_stream_capturing():
-            ar_fusion_capture(self.fptr, input)
-            self._IS_CAPTURED = True
-        else:
-            if self._IS_CAPTURED:
+    
+    @contextmanager
+    def capture(self):
+        try:
+            self._IS_CAPTURING = True
+            yield
+        finally:
+            self._IS_CAPTURING = False
+            if not self.disabled:
                 self.consume_capture()
-                self._IS_CAPTURED = False
-
-    def force_capture(self, input: torch.Tensor):
-        ar_fusion_capture(self.fptr, input)
-        self.consume_capture()
 
     def __del__(self):
         if self.fptr:
@@ -151,11 +149,9 @@ class GPUKDistEnv:
     def allreduce_add_rms_fused(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False
     ):
-        self.capture(allreduce_in)
         residual_out = torch.empty_like(residual_in)
-        norm_out = torch.empty_like(allreduce_in)
         if fp8_out:
-            norm_out = norm_out.to(fp8)
+            norm_out = torch.empty_like(allreduce_in, dtype=fp8)
             scale_out = torch.empty(
                 allreduce_in.shape[0],
                 1,
@@ -163,6 +159,7 @@ class GPUKDistEnv:
                 device=allreduce_in.device,
             )
         else:
+            norm_out = torch.empty_like(allreduce_in)
             scale_out = torch.empty(1, dtype=torch.float32, device=allreduce_in.device)
         allreduce_rms(
             self.fptr,

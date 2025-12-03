@@ -2,7 +2,7 @@
 #include "ops.h"
 
 TORCH_LIBRARY(gpuk, m) {
-    m.def("init_ar_fusion(SymInt device_id, SymInt rank, SymInt world_size, SymInt max_size_in_bytes) -> int");
+    m.def("init_ar_fusion(SymInt device_id, SymInt rank, SymInt world_size, SymInt max_size_in_bytes, SymInt comm_ptrs_buf_len) -> int");
     m.impl("init_ar_fusion", &init_ar_fusion);
     m.def("destroy_ar_fusion(SymInt fptr) -> ()");
     m.impl("destroy_ar_fusion", &destroy_ar_fusion);
@@ -17,8 +17,6 @@ TORCH_LIBRARY(gpuk, m) {
     m.def("open_ar_fusion_data_handles(SymInt fptr, Tensor[] handles) -> ()");
     m.impl("open_ar_fusion_data_handles", &open_ar_fusion_data_handles);
 
-    m.def("ar_fusion_capture(SymInt fptr, Tensor input) -> ()");
-    m.impl("ar_fusion_capture", &ar_fusion_capture);
     m.def("ar_fusion_capture_clear(SymInt fptr) -> ()");
     m.impl("ar_fusion_capture_clear", &ar_fusion_capture_clear);
     m.def("get_ar_fusion_captured_handles(SymInt fptr) -> Tensor[]");

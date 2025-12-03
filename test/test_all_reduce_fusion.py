@@ -77,6 +77,31 @@ def worker(
         scale_out_maxdiff = (scale_out.cpu().float() - ref_scale_out.cpu().float()).abs().max()
         # print(f"ref_norm_out:{ref_norm_out.float().cpu()}, norm_out:{norm_out.float().cpu()}")
         print(f"device_id:{device_id}, residual_out_maxdiff:{residual_out_maxdiff}, norm_out_maxdiff:{norm_out_maxdiff}, scale_out_maxdiff:{scale_out_maxdiff}")
+
+    # test cudagraph
+    # g = torch.cuda.CUDAGraph()
+    # local_allreduce_in = allreduce_in_[0][device_id].cuda(device_id)
+    # local_residual_in = residual_in_[0].cuda(device_id)
+    # local_rms_weight = rms_weight_[0].cuda(device_id)
+    # torch.cuda.synchronize()
+    # with torch.cuda.graph(g):
+    #     residual_out, norm_out, scale_out = dist_env.allreduce_add_rms_fused(
+    #             local_allreduce_in,
+    #             local_residual_in,
+    #             local_rms_weight,
+    #             eps,
+    #             True,
+    #         )
+    # dist_env.consume_capture()
+    # with torch.profiler.profile(
+    #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    #     profile_memory=True,
+    #     with_stack=True,
+    #     with_modules=True) as prof:
+    #     g.replay()
+    # print(prof.key_averages().table(sort_by="cuda_time_total"))
+    # torch.cuda.synchronize()
+
     dist.destroy_process_group()
 
 
@@ -119,7 +144,7 @@ def testcase(
     )
 
 
-def main(world_size=4, parts=2):
+def main(world_size=4, parts=1):
     num_tokens = 1
     testcase(
         world_size=world_size,

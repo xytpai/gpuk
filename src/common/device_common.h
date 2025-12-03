@@ -70,6 +70,9 @@
 #define gpuPointerGetAttribute hipPointerGetAttribute
 #define GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR
 #define gpuDeviceptr_t hipDeviceptr_t
+#define gpuStreamCaptureStatus hipStreamCaptureStatus
+#define gpuStreamIsCapturing hipStreamIsCapturing
+#define gpuStreamCaptureStatusActive hipStreamCaptureStatusActive
 
 #endif
 
@@ -127,6 +130,9 @@
 #define gpuPointerGetAttribute cudaPointerGetAttribute
 #define GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR CU_POINTER_ATTRIBUTE_RANGE_START_ADDR
 #define gpuDeviceptr_t cudaDeviceptr_t
+#define gpuStreamCaptureStatus cudaStreamCaptureStatus
+#define gpuStreamIsCapturing cudaStreamIsCapturing
+#define gpuStreamCaptureStatusActive cudaStreamCaptureStatusActive
 
 #endif
 
