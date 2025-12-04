@@ -115,7 +115,8 @@ public:
         } else {
             gpuStreamCaptureStatus status;
             gpuStreamIsCapturing(stream, &status);
-            if (status == gpuStreamCaptureStatusActive && size < 1024 * 4096 * 16) {
+            int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - unregistered_ptrs_.size();
+            if (status == gpuStreamCaptureStatusActive && size < 1024 * 4096 * 16 && remaining > 0) {
                 unregistered_ptrs_.push_back(ptr);
                 cptrs = comm_ptrs_ + used_comm_ptrs_ + unregistered_ptrs_.size() - 1;
             } else {
