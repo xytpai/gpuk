@@ -88,12 +88,15 @@ public:
 
     void open_data_handles(std::vector<Tensor> handles) {
         ipc_details::open_handles(rank_, handles, data_, ipc_data_);
-        CommPtrs cptrs;
-        for (int i = 0; i < world_size_; ++i) {
-            cptrs.data_ptrs[i] = ipc_data_[i];
+        CommPtrs *cptrs = new CommPtrs[comm_ptrs_buf_len_];
+        for (int i = 0; i < comm_ptrs_buf_len_; ++i) {
+            for (int j = 0; j < world_size_; ++j) {
+                cptrs[i].data_ptrs[j] = ipc_data_[j];
+            }
         }
-        gpuMemcpy(comm_ptrs_ + 0, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        gpuMemcpy(comm_ptrs_, cptrs, comm_ptrs_buf_len_ * sizeof(CommPtrs), gpuMemcpyHostToDevice);
         used_comm_ptrs_ = 1;
+        delete[] cptrs;
     }
 
     std::tuple<CommMeta, CommPtrs *> get_comm_data(const Tensor &input, gpuStream_t stream) {
@@ -130,6 +133,7 @@ public:
 
     void capture_clear() {
         unregistered_ptrs_.clear();
+        unregistered_base_ptrs_.clear();
     }
 
     std::vector<Tensor> get_captured_handles() {
@@ -141,6 +145,7 @@ public:
             void *base_ptr;
             ipc_details::create_base_ptr(&base_ptr, ptr);
             ipc_handles.push_back(ipc_details::get_handle(base_ptr));
+            unregistered_base_ptrs_.push_back(base_ptr);
         }
         return ipc_handles;
     }
@@ -151,8 +156,7 @@ public:
         offsets.reserve(num_datas);
         for (int i = 0; i < num_datas; ++i) {
             void *ptr = unregistered_ptrs_[i];
-            void *base_ptr;
-            ipc_details::create_base_ptr(&base_ptr, ptr);
+            void *base_ptr = unregistered_base_ptrs_[i];
             int64_t offset = ((char *)ptr) - ((char *)base_ptr);
             offsets.push_back(offset);
         }
@@ -162,9 +166,8 @@ public:
     }
 
     void open_captured_handles(std::vector<Tensor> &handles, std::vector<int64_t> &offsets, int64_t ptr_idx) {
-        auto ptr = unregistered_ptrs_[ptr_idx];
-        void *base_ptr;
-        ipc_details::create_base_ptr(&base_ptr, ptr);
+        void *ptr = unregistered_ptrs_[ptr_idx];
+        void *base_ptr = unregistered_base_ptrs_[ptr_idx];
         std::vector<void *> ipc_data;
         ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
         CommPtrs cptrs;
@@ -191,6 +194,7 @@ private:
     std::vector<void *> ipc_data_;
     // graph
     std::vector<void *> unregistered_ptrs_;
+    std::vector<void *> unregistered_base_ptrs_;
     CommPtrs *comm_ptrs_;
     int used_comm_ptrs_;
     std::unordered_map<void *, CommPtrs *> ptr_to_comm_ptrs_;
