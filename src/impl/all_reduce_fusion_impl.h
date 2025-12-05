@@ -422,7 +422,8 @@ void allreduce_fusion_kernel_w_launcher(
     CommPtrs *cptrs,
     gpuStream_t stream) {
     int token_num = params.size / params.hidden_dim;
-    if (token_num <= 2) {
+    // if (token_num <= 2) {
+    if (false) {
         allreduce_fusion_kernel_1stage_launcher<T, NRanks, HIDDEN_DIM>(params, meta, cptrs, stream);
     } else {
         allreduce_fusion_kernel_2stage_launcher<T, NRanks, HIDDEN_DIM>(params, meta, cptrs, stream);
