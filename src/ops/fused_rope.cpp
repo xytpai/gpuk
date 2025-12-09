@@ -26,7 +26,7 @@ void fused_rope_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Tensor
     const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(qkv));
     auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
     auto pos_strides = positions.strides();
-    TORCH_CHECK(pos_strides.size() == 2);
+    TORCH_CHECK(pos_strides.size() == 1);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         kBFloat16,
         kHalf,
@@ -38,8 +38,8 @@ void fused_rope_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Tensor
                 kw.data_ptr<scalar_t>(),
                 cos_sin.data_ptr<scalar_t>(),
                 positions.data_ptr<int64_t>(),
+                0,
                 pos_strides[0],
-                pos_strides[1],
                 num_tokens,
                 num_heads_q,
                 num_heads_k,

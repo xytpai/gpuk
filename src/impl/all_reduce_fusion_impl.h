@@ -303,6 +303,36 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_2stage(
 }
 
 template <typename T, int NRanks, int BLOCK_SIZE>
+__global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_add_kernel_1stage_naive(
+    AllReduceFusionParams<T> params, CommDeviceMeta<NRanks> meta, CommPtrs *__restrict__ cptrs, int size) {
+    static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    SyncComm<NRanks> comm(meta);
+    comm.sync();
+    using vec_t_ = vec_t<T, VEC_SIZE>;
+    for (
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        idx < size;
+        idx += gridDim.x * blockDim.x) {
+        auto acc = reinterpret_cast<vec_t_ *>(cptrs->data_ptrs[0])[idx];
+#pragma unroll
+        for (int r = 1; r < NRanks; ++r) {
+            auto vec = reinterpret_cast<vec_t_ *>(cptrs->data_ptrs[r])[idx];
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                acc.data[v] = acc.data[v] + vec.data[v];
+            }
+        }
+        auto vec = reinterpret_cast<vec_t_ *>(params.residual_in)[idx];
+#pragma unroll
+        for (int v = 0; v < VEC_SIZE; ++v) {
+            acc.data[v] = acc.data[v] + vec.data[v];
+        }
+        reinterpret_cast<vec_t_ *>(params.residual_out)[idx] = acc;
+    }
+    comm.sync();
+}
+
+template <typename T, int NRanks, int BLOCK_SIZE>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_add_kernel_1stage(
     AllReduceFusionParams<T> params, CommDeviceMeta<NRanks> meta, CommPtrs *__restrict__ cptrs) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
@@ -422,8 +452,7 @@ void allreduce_fusion_kernel_w_launcher(
     CommPtrs *cptrs,
     gpuStream_t stream) {
     int token_num = params.size / params.hidden_dim;
-    // if (token_num <= 2) {
-    if (false) {
+    if (token_num <= 8) {
         allreduce_fusion_kernel_1stage_launcher<T, NRanks, HIDDEN_DIM>(params, meta, cptrs, stream);
     } else {
         allreduce_fusion_kernel_2stage_launcher<T, NRanks, HIDDEN_DIM>(params, meta, cptrs, stream);
