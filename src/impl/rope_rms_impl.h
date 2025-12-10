@@ -1,3 +1,5 @@
+#pragma once
+
 #include "device_common.h"
 
 namespace rope_rms {
