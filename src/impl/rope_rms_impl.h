@@ -29,7 +29,7 @@ __inline__ __device__ T warp_shfl_sync(T val, int src_id) {
 #ifdef __CUDACC__
     return __shfl_sync(0xffffffff, val, src_id);
 #else
-    return __shfl_sync(__activemask(), val, src_id, WARP_SIZE);
+    return __shfl(val, src_id, WARP_SIZE);
 #endif
 }
 
@@ -113,7 +113,6 @@ __device__ __forceinline__ void warp_rms_norm_(
     int warp_t_id = threadIdx.x % WARP_SIZE;
     acc = block_utils::warp_reduce_sum<float>(acc);
     acc = block_utils::warp_shfl_sync<float>(acc, 0);
-    __syncwarp();
     auto s_val = rsqrtf(acc / rms_dim + rms_eps);
 #pragma unroll
     for (int i = 0; i < VEC_SIZE; ++i) {
