@@ -64,38 +64,37 @@ struct CommPtrs {
 template <int NRanks>
 struct SyncComm {
     __device__ __forceinline__ SyncComm(CommDeviceMeta<NRanks> &meta) {
-#pragma unroll
-        for (int r = 0; r < NRanks; ++r) {
-            barrier_flags[r] = meta.barrier_flag_ptrs[r];
-        }
         flag_ptr = ((int *)meta.sync_clock) + blockIdx.x;
         int rank = meta.rank;
-        __syncthreads();
         if (threadIdx.x < NRanks) {
             int target_rank = threadIdx.x;
-            target_flag = reinterpret_cast<int *>(barrier_flags[target_rank]) + blockIdx.x * NRanks + rank;
-            current_flag = reinterpret_cast<int *>(barrier_flags[rank]) + blockIdx.x * NRanks + target_rank;
+            target_flag = reinterpret_cast<int *>(meta.barrier_flag_ptrs[target_rank]) + blockIdx.x * NRanks + rank;
+            current_flag = reinterpret_cast<int *>(meta.barrier_flag_ptrs[rank]) + blockIdx.x * NRanks + target_rank;
         }
+        flag = *flag_ptr;
     }
 
-    template <bool RELAXED = true>
+    template <bool RELAXED = true, bool FINAL = true>
     __device__ __forceinline__ void sync() {
-        auto flag = (*flag_ptr) + 1;
+        __syncthreads();
+        flag += 1;
         if (threadIdx.x < NRanks) {
             details::st_flag<RELAXED>(target_flag, flag);
             while (details::ld_flag<RELAXED>(current_flag) < flag) {
             }
         }
         __syncthreads();
-        if (threadIdx.x == 0) {
-            *flag_ptr = flag;
+        if constexpr (FINAL) {
+            if (threadIdx.x == 0) {
+                *flag_ptr = flag;
+            }
         }
     }
 
     int *flag_ptr;
-    void *barrier_flags[NRanks];
     int *target_flag;
     int *current_flag;
+    int flag;
 };
 
 enum QuantType {
@@ -132,7 +131,7 @@ __device__ __forceinline__ vec_t<QuantT, VEC_SIZE> convert_to_fp8(vec_t<T, VEC_S
     return out_vec;
 }
 
-template <typename T, int VEC_SIZE, typename OutT>
+template <typename T, int VEC_SIZE, typename OutT, int BLOCK_SIZE>
 __device__ __forceinline__ vec_t<OutT, VEC_SIZE> rms_norm(AllReduceFusionParams<T> const &m_params,
                                                           vec_t<T, VEC_SIZE> const &residual, vec_t<T, VEC_SIZE> const &gamma) {
     __shared__ float s_val;
@@ -143,7 +142,7 @@ __device__ __forceinline__ vec_t<OutT, VEC_SIZE> rms_norm(AllReduceFusionParams<
         float v = static_cast<float>(reinterpret_cast<T const *>(&residual)[i]);
         acc += v * v;
     }
-    acc = block_reduce<float, WARP_SIZE>(acc, std::plus<float>());
+    acc = block_reduce<float, WARP_SIZE, BLOCK_SIZE>(acc, std::plus<float>());
     if (threadIdx.x == 0) {
         s_val = rsqrtf(acc / m_params.hidden_dim + m_params.rms_eps);
     }
@@ -156,7 +155,7 @@ __device__ __forceinline__ vec_t<OutT, VEC_SIZE> rms_norm(AllReduceFusionParams<
     return norm_out;
 }
 
-template <typename T, int VEC_SIZE>
+template <typename T, int VEC_SIZE, int BLOCK_SIZE>
 __device__ __forceinline__ float reduce_abs_max(vec_t<T, VEC_SIZE> const &data) {
     __shared__ float s_val;
     auto fn = [](float a, float b) { return a > b ? a : b; };
@@ -166,7 +165,7 @@ __device__ __forceinline__ float reduce_abs_max(vec_t<T, VEC_SIZE> const &data) 
         float v = static_cast<float>(reinterpret_cast<T const *>(&data)[i]);
         acc = fn(acc, std::abs(v));
     }
-    acc = block_reduce<float, WARP_SIZE>(acc, fn);
+    acc = block_reduce<float, WARP_SIZE, BLOCK_SIZE>(acc, fn);
     if (threadIdx.x == 0) {
         s_val = acc;
     }
@@ -175,7 +174,7 @@ __device__ __forceinline__ float reduce_abs_max(vec_t<T, VEC_SIZE> const &data) 
     return acc;
 }
 
-template <typename T, int VEC_SIZE, bool STORE = true>
+template <typename T, int VEC_SIZE, bool STORE = true, int BLOCK_SIZE = 0, int QUANT_TYPE = 0>
 __device__ __forceinline__ void epilogue(
     AllReduceFusionParams<T> const &params,
     vec_t<T, VEC_SIZE> &rms_in,
@@ -183,18 +182,18 @@ __device__ __forceinline__ void epilogue(
     int idx, int tidx) {
     if constexpr (STORE)
         rms_in.store(reinterpret_cast<T *>(params.residual_out) + idx);
-    if (params.quant_type == QuantType::NONE) {
-        auto val = rms_norm<T, VEC_SIZE, T>(params, rms_in, rms_weight);
+    if constexpr (QUANT_TYPE == QuantType::NONE) {
+        auto val = rms_norm<T, VEC_SIZE, T, BLOCK_SIZE>(params, rms_in, rms_weight);
         val.store(reinterpret_cast<T *>(params.norm_out) + idx);
     } else {
-        auto val = rms_norm<T, VEC_SIZE, float>(params, rms_in, rms_weight);
-        float scale = reduce_abs_max<float, VEC_SIZE>(val);
-        if (params.quant_type == QuantType::FP8E4M3FN) {
-            scale = scale == 0.f ? 1.f : scale / fp8e4m3fn::max_value;
+        auto val = rms_norm<T, VEC_SIZE, float, BLOCK_SIZE>(params, rms_in, rms_weight);
+        float scale = reduce_abs_max<float, VEC_SIZE, BLOCK_SIZE>(val);
+        if constexpr (QUANT_TYPE == QuantType::FP8E4M3FN) {
+            scale = scale == 0.f ? 1.f : scale / (float)fp8e4m3fn::max_value;
             auto val_fp8 = convert_to_fp8<float, VEC_SIZE, fp8e4m3fn>(val, scale);
             val_fp8.store(reinterpret_cast<fp8e4m3fn *>(params.norm_out) + idx);
         } else {
-            scale = scale == 0.f ? 1.f : scale / fp8e4m3fnuz::max_value;
+            scale = scale == 0.f ? 1.f : scale / (float)fp8e4m3fnuz::max_value;
             auto val_fp8 = convert_to_fp8<float, VEC_SIZE, fp8e4m3fnuz>(val, scale);
             val_fp8.store(reinterpret_cast<fp8e4m3fnuz *>(params.norm_out) + idx);
         }
@@ -203,37 +202,47 @@ __device__ __forceinline__ void epilogue(
     }
 }
 
-template <typename T, int NRanks, int BLOCK_SIZE>
+template <typename T, int NRanks, int BLOCK_SIZE, int QUANT_TYPE>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_1stage(
     AllReduceFusionParams<T> params, CommDeviceMeta<NRanks> meta, CommPtrs *__restrict__ cptrs) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     SyncComm<NRanks> comm(meta);
     comm.sync();
     using vec_t_ = vec_t<T, VEC_SIZE>;
+    using acc_vec_t_ = vec_t<float, VEC_SIZE>;
     int tidx = blockIdx.x;
     int access_id_in_token = threadIdx.x * VEC_SIZE;
     int idx = tidx * params.hidden_dim + access_id_in_token;
 
-    auto acc = *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(cptrs->data_ptrs[0]) + idx);
+    acc_vec_t_ acc;
+    auto vec = *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(cptrs->data_ptrs[0]) + idx);
+#pragma unroll
+    for (int v = 0; v < VEC_SIZE; ++v) {
+        acc.data[v] = vec.data[v];
+    }
 #pragma unroll
     for (int r = 1; r < NRanks; ++r) {
-        auto vec = *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(cptrs->data_ptrs[r]) + idx);
+        vec = *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(cptrs->data_ptrs[r]) + idx);
 #pragma unroll
         for (int v = 0; v < VEC_SIZE; ++v) {
-            acc.data[v] = acc.data[v] + vec.data[v];
+            acc.data[v] += (float)vec.data[v];
         }
     }
     auto res = *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(params.residual_in) + idx);
 #pragma unroll
     for (int v = 0; v < VEC_SIZE; ++v) {
-        acc.data[v] = acc.data[v] + res.data[v];
+        acc.data[v] += (float)res.data[v];
     }
-    *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(params.residual_out) + idx) = acc;
+#pragma unroll
+    for (int v = 0; v < VEC_SIZE; ++v) {
+        vec.data[v] = (T)acc.data[v];
+    }
+    *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(params.residual_out) + idx) = vec;
     auto gamma = *reinterpret_cast<vec_t_ *>(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
-    epilogue<T, VEC_SIZE, false>(params, acc, gamma, idx, tidx);
+    epilogue<T, VEC_SIZE, false, BLOCK_SIZE, QUANT_TYPE>(params, vec, gamma, idx, tidx);
 }
 
-template <typename T, int NRanks, int HIDDEN_DIM>
+template <typename T, int NRanks, int HIDDEN_DIM, int QUANT_TYPE>
 void allreduce_fusion_kernel_1stage_launcher(
     AllReduceFusionParams<T> const &params,
     CommDeviceMeta<NRanks> const &meta,
@@ -242,13 +251,13 @@ void allreduce_fusion_kernel_1stage_launcher(
     constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     constexpr int BLOCK_SIZE = HIDDEN_DIM / VEC_SIZE;
     int token_num = params.size / params.hidden_dim;
-    assert(token_num <= NBLOCKS_PER_GPU);
+    TORCH_CHECK(token_num <= NBLOCKS_PER_GPU);
     dim3 threadsPerBlock(BLOCK_SIZE);
     dim3 numBlocks(token_num);
-    allreduce_fusion_kernel_1stage<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
+    allreduce_fusion_kernel_1stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
 }
 
-template <typename T, int NRanks, int BLOCK_SIZE>
+template <typename T, int NRanks, int BLOCK_SIZE, int QUANT_TYPE>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_2stage(
     AllReduceFusionParams<T> params, CommDeviceMeta<NRanks> meta, CommPtrs *cptrs) {
     static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
@@ -259,7 +268,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_2stage(
     int warp_id = threadIdx.x / WARP_SIZE_;
     int lane_id = threadIdx.x % WARP_SIZE_;
 
-    comm.sync();
+    comm.template sync<true, false>();
 
     for (
         int idx = ((blockIdx.x * NRanks + params.rank) * WARP_SIZE_ + lane_id) * VEC_SIZE;
@@ -270,15 +279,26 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_2stage(
         val.store(&shared[0] + threadIdx.x * VEC_SIZE);
         __syncthreads();
         if (warp_id == 0) {
-            vec_t<T, VEC_SIZE> acc;
-            acc.load(&shared[0] + lane_id * VEC_SIZE);
+            vec_t<T, VEC_SIZE> vec;
+            vec_t<float, VEC_SIZE> acc;
+            vec.load(&shared[0] + lane_id * VEC_SIZE);
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                acc.data[v] = (float)vec.data[v];
+            }
 #pragma unroll
             for (int r = 1; r < NRanks; ++r) {
-                vec_t<T, VEC_SIZE> vec;
                 vec.load(&shared[0] + (r * WARP_SIZE_ + lane_id) * VEC_SIZE);
-                vec_add_<T, VEC_SIZE>(acc, vec);
+#pragma unroll
+                for (int v = 0; v < VEC_SIZE; ++v) {
+                    acc.data[v] += (float)vec.data[v];
+                }
             }
-            acc.store(&shared[0] + lane_id * VEC_SIZE);
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                vec.data[v] = (T)acc.data[v];
+            }
+            vec.store(&shared[0] + lane_id * VEC_SIZE);
         }
         __syncthreads();
         val.load(&shared[0] + lane_id * VEC_SIZE);
@@ -291,18 +311,18 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_2stage(
     int access_id_in_token = threadIdx.x * VEC_SIZE;
     vec_t<T, VEC_SIZE> gamma;
     gamma.load(reinterpret_cast<T *>(params.rms_gamma) + access_id_in_token);
-    comm.template sync<false>();
+    comm.template sync<false, true>();
     for (
         int idx = blockIdx.x * params.hidden_dim + access_id_in_token, tidx = blockIdx.x;
         idx < params.size;
         idx += gridDim.x * params.hidden_dim, tidx += gridDim.x) {
         vec_t<T, VEC_SIZE> val;
         val.load(reinterpret_cast<T *>(cptrs->data_ptrs[params.rank]) + idx);
-        epilogue<T, VEC_SIZE, true>(params, val, gamma, idx, tidx);
+        epilogue<T, VEC_SIZE, true, BLOCK_SIZE, QUANT_TYPE>(params, val, gamma, idx, tidx);
     }
 }
 
-template <typename T, int NRanks, int HIDDEN_DIM>
+template <typename T, int NRanks, int HIDDEN_DIM, int QUANT_TYPE>
 void allreduce_fusion_kernel_2stage_launcher(
     AllReduceFusionParams<T> const &params,
     CommDeviceMeta<NRanks> const &meta,
@@ -314,10 +334,10 @@ void allreduce_fusion_kernel_2stage_launcher(
     dim3 threadsPerBlock(BLOCK_SIZE);
     token_num = std::min(token_num, NBLOCKS_PER_GPU);
     dim3 numBlocks(token_num);
-    allreduce_fusion_kernel_2stage<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
+    allreduce_fusion_kernel_2stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
 }
 
-template <typename T, int NRanks, int HIDDEN_DIM>
+template <typename T, int NRanks, int HIDDEN_DIM, int QUANT_TYPE>
 void allreduce_fusion_kernel_launcher_(
     AllReduceFusionParams<T> const &params,
     CommDeviceMeta<NRanks> const &meta,
@@ -325,13 +345,36 @@ void allreduce_fusion_kernel_launcher_(
     gpuStream_t stream) {
     constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     int token_num = params.size / params.hidden_dim;
-    assert(params.size % params.hidden_dim == 0);
-    assert(params.hidden_dim % VEC_SIZE == 0);
-    assert(params.hidden_dim == HIDDEN_DIM);
-    if (token_num <= 8) {
-        allreduce_fusion_kernel_1stage_launcher<T, NRanks, HIDDEN_DIM>(params, meta, cptrs, stream);
+    TORCH_CHECK(params.size % params.hidden_dim == 0);
+    TORCH_CHECK(params.hidden_dim % VEC_SIZE == 0);
+    TORCH_CHECK(params.hidden_dim == HIDDEN_DIM);
+    auto bytes = params.size * sizeof(T);
+    bool use_1s = token_num <= (NBLOCKS_PER_GPU / 4);
+    use_1s = use_1s && ((NRanks <= 2) || (NRanks <= 4 && bytes < 160 * 1024) || (NRanks <= 8 && bytes < 80 * 1024));
+    if (use_1s) {
+        allreduce_fusion_kernel_1stage_launcher<T, NRanks, HIDDEN_DIM, QUANT_TYPE>(params, meta, cptrs, stream);
     } else {
-        allreduce_fusion_kernel_2stage_launcher<T, NRanks, HIDDEN_DIM>(params, meta, cptrs, stream);
+        allreduce_fusion_kernel_2stage_launcher<T, NRanks, HIDDEN_DIM, QUANT_TYPE>(params, meta, cptrs, stream);
+    }
+}
+
+template <typename T, int NRanks, int QUANT_TYPE>
+void allreduce_fusion_kernel_launcher_hd(AllReduceFusionParams<T> const &params,
+                                         CommDeviceMeta<NRanks> const &meta,
+                                         CommPtrs *cptrs,
+                                         gpuStream_t stream) {
+    switch (params.hidden_dim) {
+    case 4096:
+        allreduce_fusion_kernel_launcher_<T, NRanks, 4096, QUANT_TYPE>(params, meta, cptrs, stream);
+        return;
+    case 2048:
+        allreduce_fusion_kernel_launcher_<T, NRanks, 2048, QUANT_TYPE>(params, meta, cptrs, stream);
+        return;
+    case 1024:
+        allreduce_fusion_kernel_launcher_<T, NRanks, 1024, QUANT_TYPE>(params, meta, cptrs, stream);
+        return;
+    default:
+        TORCH_CHECK(false);
     }
 }
 
@@ -340,18 +383,18 @@ void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
                                       CommDeviceMeta<NRanks> const &meta,
                                       CommPtrs *cptrs,
                                       gpuStream_t stream) {
-    switch (params.hidden_dim) {
-    case 4096:
-        allreduce_fusion_kernel_launcher_<T, NRanks, 4096>(params, meta, cptrs, stream);
+    switch (params.quant_type) {
+    case QuantType::NONE:
+        allreduce_fusion_kernel_launcher_hd<T, NRanks, QuantType::NONE>(params, meta, cptrs, stream);
         return;
-    case 2048:
-        allreduce_fusion_kernel_launcher_<T, NRanks, 2048>(params, meta, cptrs, stream);
+    case QuantType::FP8E4M3FN:
+        allreduce_fusion_kernel_launcher_hd<T, NRanks, QuantType::FP8E4M3FN>(params, meta, cptrs, stream);
         return;
-    case 1024:
-        allreduce_fusion_kernel_launcher_<T, NRanks, 1024>(params, meta, cptrs, stream);
+    case QuantType::FP8E4M3FNUZ:
+        allreduce_fusion_kernel_launcher_hd<T, NRanks, QuantType::FP8E4M3FNUZ>(params, meta, cptrs, stream);
         return;
     default:
-        assert(false);
+        TORCH_CHECK(false);
     }
 }
 

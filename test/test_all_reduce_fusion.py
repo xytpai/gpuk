@@ -4,6 +4,8 @@ import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import gpuk
+import aiter
+from aiter.test_common import checkAllclose
 
 
 def init_world(device_id, num_devices, parts, port=24534):
@@ -72,11 +74,28 @@ def worker(
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10000))
         ref_norm_out = ref_norm_out.float() * ref_scale_out
         norm_out = norm_out.float() * scale_out
-        residual_out_maxdiff = (residual_out.cpu().float() - ref_residual_out.cpu().float()).abs().max()
-        norm_out_maxdiff = (norm_out.cpu().float() - ref_norm_out.cpu().float()).abs().max()
-        scale_out_maxdiff = (scale_out.cpu().float() - ref_scale_out.cpu().float()).abs().max()
+        # residual_out_maxdiff = (residual_out.cpu().float() - ref_residual_out.cpu().float()).abs().max()
+        # norm_out_maxdiff = (norm_out.cpu().float() - ref_norm_out.cpu().float()).abs().max()
+        # scale_out_maxdiff = (scale_out.cpu().float() - ref_scale_out.cpu().float()).abs().max()
         # print(f"ref_norm_out:{ref_norm_out.float().cpu()}, norm_out:{norm_out.float().cpu()}")
-        print(f"device_id:{device_id}, residual_out_maxdiff:{residual_out_maxdiff}, norm_out_maxdiff:{norm_out_maxdiff}, scale_out_maxdiff:{scale_out_maxdiff}")
+        # print(f"device_id:{device_id}, residual_out_maxdiff:{residual_out_maxdiff}, norm_out_maxdiff:{norm_out_maxdiff}, scale_out_maxdiff:{scale_out_maxdiff}")
+        checkAllclose(
+            residual_out.float(),
+            ref_residual_out.float(),
+            rtol=1e-2,
+            atol=1e-2,
+            msg="residual_out",
+        )
+        checkAllclose(
+            norm_out.float(), ref_norm_out.float(), rtol=1e-2, atol=1e-2, msg="norm_out"
+        )
+        checkAllclose(
+            scale_out.float(),
+            ref_scale_out.float(),
+            rtol=1e-2,
+            atol=1e-2,
+            msg="scale_out",
+        )
 
     # test cudagraph
     # g = torch.cuda.CUDAGraph()
@@ -144,7 +163,7 @@ def testcase(
     )
 
 
-def main(world_size=4, parts=2):
+def main(world_size=8, parts=2):
     num_tokens = 1
     testcase(
         world_size=world_size,
