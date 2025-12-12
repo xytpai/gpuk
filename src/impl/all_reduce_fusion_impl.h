@@ -9,6 +9,7 @@ namespace cg = cooperative_groups;
 #define WARP_SIZE 32
 #define MAX_RANKS 8
 #define NBLOCKS_PER_GPU 256
+#define CHECK_FAIL assert
 
 namespace details {
 
@@ -251,7 +252,7 @@ void allreduce_fusion_kernel_1stage_launcher(
     constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     constexpr int BLOCK_SIZE = HIDDEN_DIM / VEC_SIZE;
     int token_num = params.size / params.hidden_dim;
-    TORCH_CHECK(token_num <= NBLOCKS_PER_GPU);
+    CHECK_FAIL(token_num <= NBLOCKS_PER_GPU);
     dim3 threadsPerBlock(BLOCK_SIZE);
     dim3 numBlocks(token_num);
     allreduce_fusion_kernel_1stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
@@ -345,9 +346,9 @@ void allreduce_fusion_kernel_launcher_(
     gpuStream_t stream) {
     constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     int token_num = params.size / params.hidden_dim;
-    TORCH_CHECK(params.size % params.hidden_dim == 0);
-    TORCH_CHECK(params.hidden_dim % VEC_SIZE == 0);
-    TORCH_CHECK(params.hidden_dim == HIDDEN_DIM);
+    CHECK_FAIL(params.size % params.hidden_dim == 0);
+    CHECK_FAIL(params.hidden_dim % VEC_SIZE == 0);
+    CHECK_FAIL(params.hidden_dim == HIDDEN_DIM);
     auto bytes = params.size * sizeof(T);
     bool use_1s = token_num <= (NBLOCKS_PER_GPU / 4);
     use_1s = use_1s && ((NRanks <= 2) || (NRanks <= 4 && bytes < 160 * 1024) || (NRanks <= 8 && bytes < 80 * 1024));
@@ -374,7 +375,7 @@ void allreduce_fusion_kernel_launcher_hd(AllReduceFusionParams<T> const &params,
         allreduce_fusion_kernel_launcher_<T, NRanks, 1024, QUANT_TYPE>(params, meta, cptrs, stream);
         return;
     default:
-        TORCH_CHECK(false);
+        CHECK_FAIL(false);
     }
 }
 
@@ -394,7 +395,7 @@ void allreduce_fusion_kernel_launcher(AllReduceFusionParams<T> const &params,
         allreduce_fusion_kernel_launcher_hd<T, NRanks, QuantType::FP8E4M3FNUZ>(params, meta, cptrs, stream);
         return;
     default:
-        TORCH_CHECK(false);
+        CHECK_FAIL(false);
     }
 }
 
@@ -439,7 +440,7 @@ void allreduce_rms_fusion_impl(CommMeta meta, CommPtrs *cptrs, int size,
     } else if (nranks == 2) {
         DISPATCH_NRANKS(2)
     } else {
-        assert(false);
+        CHECK_FAIL(false);
     }
 
 #undef DISPATCH_NRANKS
