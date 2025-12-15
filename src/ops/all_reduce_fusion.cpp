@@ -49,7 +49,8 @@ public:
         int64_t world_size,        // group size
         int64_t size_in_bytes,     // private data size
         int64_t comm_ptrs_buf_len, // cached ptrs size
-        int64_t max_thread_blocks = NBLOCKS_PER_GPU) {
+        int64_t max_thread_blocks = NBLOCKS_PER_GPU,
+        bool round_robin = true) {
         TORCH_CHECK(rank < world_size);
         gpuSetDevice(device_id);
         device_id_ = device_id;
@@ -65,6 +66,7 @@ public:
         gpuMemset(sync_clock_, 0, max_thread_blocks_ * sizeof(int));
         gpuMemset(barrier_flags_, 0, max_thread_blocks_ * world_size_ * sizeof(int));
         used_comm_ptrs_ = 0;
+        round_robin_ = round_robin;
     }
 
     ~CommWorkspace() {
@@ -91,7 +93,8 @@ public:
         CommPtrs *cptrs = new CommPtrs[comm_ptrs_buf_len_];
         for (int i = 0; i < comm_ptrs_buf_len_; ++i) {
             for (int j = 0; j < world_size_; ++j) {
-                cptrs[i].data_ptrs[j] = ipc_data_[j];
+                int r = round_robin_ ? ((rank_ + j) % world_size_) : j;
+                cptrs[i].data_ptrs[j] = ipc_data_[r];
             }
         }
         gpuMemcpy(comm_ptrs_, cptrs, comm_ptrs_buf_len_ * sizeof(CommPtrs), gpuMemcpyHostToDevice);
@@ -173,7 +176,10 @@ public:
         CommPtrs cptrs;
         for (int i = 0; i < offsets.size(); ++i) {
             ipc_data[i] = (void *)((char *)ipc_data[i] + offsets[i]);
-            cptrs.data_ptrs[i] = ipc_data[i];
+        }
+        for (int i = 0; i < offsets.size(); ++i) {
+            int r = round_robin_ ? ((rank_ + i) % world_size_) : i;
+            cptrs.data_ptrs[i] = ipc_data[r];
         }
         gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
         ptr_to_comm_ptrs_[ptr] = comm_ptrs_ + used_comm_ptrs_;
@@ -187,6 +193,7 @@ private:
     int size_in_bytes_;
     int comm_ptrs_buf_len_;
     int max_thread_blocks_;
+    bool round_robin_;
     void *sync_clock_;
     void *barrier_flags_;
     void *data_;
