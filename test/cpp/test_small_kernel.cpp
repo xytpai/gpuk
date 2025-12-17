@@ -1,49 +1,95 @@
-#include "device_common.h"
+#include <cassert>
+#include <iostream>
 
-template <typename T, int vec_size, int loops>
-__global__ void threads_copy_kernel(const T *in, T *out, const size_t n) {
-    const int block_work_size = loops * blockDim.x * vec_size;
-    auto index = blockIdx.x * block_work_size + threadIdx.x * vec_size;
-#pragma unroll
-    for (int i = 0; i < loops; ++i) {
-        auto remaining = n - index;
-        if (remaining < vec_size) {
-            for (auto i = index; i < n; i++) {
-                out[i] = in[i];
-            }
-        } else {
-            using vec_t = kernel_utils::vec_t<T, vec_size>;
-            auto in_vec = reinterpret_cast<vec_t *>(const_cast<T *>(&in[index]));
-            auto out_vec = reinterpret_cast<vec_t *>(&out[index]);
-            *out_vec = *in_vec;
-        }
-        index += blockDim.x * vec_size;
-    }
+#if defined(__HIPCC__)
+#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
+#define gpuSuccess hipSuccess
+#define gpuMemcpy hipMemcpy
+#define gpuMemcpyAsync hipMemcpyAsync
+#define gpuMemset hipMemset
+#define gpuMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define gpuMemcpyHostToDevice hipMemcpyHostToDevice
+#define gpuMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define gpuMalloc hipMalloc
+#define gpuFree hipFree
+#define gpuDeviceSynchronize hipDeviceSynchronize
+#define gpuSetDevice hipSetDevice
+#define gpuGetDevice hipGetDevice
+#define gpuGetDeviceCount hipGetDeviceCount
+#define gpuMemcpyPeerAsync hipMemcpyPeerAsync
+#define gpuDeviceCanAccessPeer hipDeviceCanAccessPeer
+#define gpuDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define gpuEvent_t hipEvent_t
+#define gpuEventCreate hipEventCreate
+#define gpuEventDestroy hipEventDestroy
+#define gpuEventRecord hipEventRecord
+#define gpuEventSynchronize hipEventSynchronize
+#define gpuEventElapsedTime hipEventElapsedTime
+#define gpuStream_t hipStream_t
+#define gpuStreamCreate hipStreamCreate
+#define gpuStreamDestroy hipStreamDestroy
+#define gpuStreamSynchronize hipStreamSynchronize
+#endif
+
+#if defined(__CUDACC__)
+#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
+#define gpuSuccess cudaSuccess
+#define gpuMemcpy cudaMemcpy
+#define gpuMemcpyAsync cudaMemcpyAsync
+#define gpuMemset cudaMemset
+#define gpuMemcpyDeviceToHost cudaMemcpyDeviceToHost
+#define gpuMemcpyHostToDevice cudaMemcpyHostToDevice
+#define gpuMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
+#define gpuMalloc cudaMalloc
+#define gpuFree cudaFree
+#define gpuDeviceSynchronize cudaDeviceSynchronize
+#define gpuSetDevice cudaSetDevice
+#define gpuGetDevice cudaGetDevice
+#define gpuGetDeviceCount cudaGetDeviceCount
+#define gpuMemcpyPeerAsync cudaMemcpyPeerAsync
+#define gpuDeviceCanAccessPeer cudaDeviceCanAccessPeer
+#define gpuDeviceEnablePeerAccess cudaDeviceEnablePeerAccess
+#define gpuEvent_t cudaEvent_t
+#define gpuEventCreate cudaEventCreate
+#define gpuEventDestroy cudaEventDestroy
+#define gpuEventRecord cudaEventRecord
+#define gpuEventSynchronize cudaEventSynchronize
+#define gpuEventElapsedTime cudaEventElapsedTime
+#define gpuStream_t cudaStream_t
+#define gpuStreamCreate cudaStreamCreate
+#define gpuStreamDestroy cudaStreamDestroy
+#define gpuStreamSynchronize cudaStreamSynchronize
+#endif
+
+template <typename scalar_t, int vec_size>
+struct alignas(sizeof(scalar_t) * vec_size) aligned_array {
+    scalar_t val[vec_size];
+};
+
+template <typename T, int vec_size>
+__global__ void threads_copy_kernel(T *in, T *out) {
+    using vec_t = aligned_array<T, vec_size>;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    reinterpret_cast<vec_t *>(out)[idx] = reinterpret_cast<vec_t *>(in)[idx];
 }
 
-template <typename T, int vec_size, int loops>
-void threads_copy(const T *in, T *out, size_t n, gpuStream_t s) {
-    const int block_size = 256;
-    const int block_work_size = loops * block_size * vec_size;
+template <typename T, int vec_size>
+float threads_copy(T *in, T *out, int n, gpuStream_t s) {
+    int block_size = 128;
+    int block_work_size = block_size * vec_size;
+    assert(n % block_work_size == 0);
+    int nblocks = n / block_work_size;
     dim3 threadsPerBlock(block_size);
-    dim3 numBlocks((n + block_work_size - 1) / block_work_size);
-    threads_copy_kernel<T, vec_size, loops><<<numBlocks, threadsPerBlock, 0, s>>>(in, out, n);
-}
-
-template <typename T, int vec_size, int loops>
-float threads_copy_(const T *in, T *out, size_t n) {
-    const int block_size = 64;
-    const int block_work_size = loops * block_size * vec_size;
-
-    dim3 threadsPerBlock(block_size);
-    dim3 numBlocks((n + block_work_size - 1) / block_work_size);
+    dim3 numBlocks(nblocks);
 
     gpuEvent_t start, stop;
     gpuEventCreate(&start);
     gpuEventCreate(&stop);
     gpuEventRecord(start);
 
-    threads_copy_kernel<T, vec_size, loops><<<numBlocks, threadsPerBlock>>>(in, out, n);
+    threads_copy_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, s>>>(in, out);
     gpuDeviceSynchronize();
 
     gpuEventRecord(stop);
@@ -53,8 +99,8 @@ float threads_copy_(const T *in, T *out, size_t n) {
     return ms;
 }
 
-template <int vec_size, typename scalar_t, int loops>
-void test_threads_copy(size_t n) {
+template <typename scalar_t, int vec_size>
+void test_threads_copy(int n) {
     auto in_cpu = new scalar_t[n];
     auto out_cpu = new scalar_t[n];
     for (int i = 0; i < n; i++)
@@ -63,24 +109,25 @@ void test_threads_copy(size_t n) {
     scalar_t *in_gpu, *out_gpu;
     gpuMalloc(&in_gpu, n * sizeof(scalar_t));
     gpuMalloc(&out_gpu, n * sizeof(scalar_t));
-
     gpuMemcpy(in_gpu, in_cpu, n * sizeof(scalar_t), gpuMemcpyHostToDevice);
+    gpuDeviceSynchronize();
 
     float timems;
-    for (int i = 0; i < 2; i++)
-        timems = threads_copy_<scalar_t, vec_size, loops>(in_gpu, out_gpu, n);
-    std::cout << "timems:" << timems << " throughput:";
+    for (int i = 0; i < 3; i++)
+        timems = threads_copy<scalar_t, vec_size>(in_gpu, out_gpu, n, 0);
+    std::cout << "timeus:" << timems * 1000 << " throughput:";
 
     float total_GBytes = (n + n) * sizeof(scalar_t) / 1000.0 / 1000.0;
     std::cout << total_GBytes / (timems) << " GBPS val:";
 
     gpuMemcpy(out_cpu, out_gpu, n * sizeof(scalar_t), gpuMemcpyDeviceToHost);
+    gpuDeviceSynchronize();
 
     for (int i = 0; i < n; i++) {
         auto diff = (float)out_cpu[i] - (float)in_cpu[i];
         diff = diff > 0 ? diff : -diff;
         if (diff > 0.01) {
-            std::cout << "error\n";
+            std::cout << "error: " << "ref:" << (float)in_cpu[i] << ", actual:" << (float)out_cpu[i] << "\n";
             return;
         }
     }
@@ -93,11 +140,14 @@ void test_threads_copy(size_t n) {
 }
 
 int main() {
-    constexpr int loops = 1;
-    std::cout << "128 elements small copy kernel test ...\n";
-    test_threads_copy<4, float, loops>(128);
-    test_threads_copy<4, float, loops>(128);
-    std::cout << "256 elements small copy kernel test ...\n";
-    test_threads_copy<4, float, loops>(256);
-    test_threads_copy<4, float, loops>(256);
+    constexpr int vec_size = 4;
+    int n;
+    n = 128 * vec_size;
+    std::cout << n << " bytes small copy kernel test ...\n";
+    test_threads_copy<float, vec_size>(n);
+    test_threads_copy<float, vec_size>(n);
+    n = 256 * vec_size;
+    std::cout << n << " bytes small copy kernel test ...\n";
+    test_threads_copy<float, vec_size>(n);
+    test_threads_copy<float, vec_size>(n);
 }
