@@ -267,10 +267,14 @@ void open_ar_fusion_captured_handles(fptr_t fptr, std::vector<Tensor> handles, s
 }
 
 template <typename T>
-struct KernelElementType { using type = T; };
+struct KernelElementType {
+    using type = T;
+};
 
 template <>
-struct KernelElementType<c10::Half> { using type = __half; };
+struct KernelElementType<c10::Half> {
+    using type = __half;
+};
 
 template <>
 struct KernelElementType<c10::BFloat16> {

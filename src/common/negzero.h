@@ -3,7 +3,9 @@
 #include "device_common.h"
 
 template <typename T>
-struct neg_zero { static constexpr T value = -T(0); };
+struct neg_zero {
+    static constexpr T value = -T(0);
+};
 
 template <>
 struct neg_zero<__half> {
