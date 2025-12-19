@@ -75,7 +75,7 @@ __global__ void threads_copy_kernel(T *in, T *out) {
     reinterpret_cast<vec_t *>(out)[idx] = reinterpret_cast<vec_t *>(in)[idx];
 }
 
-template <typename T, int vec_size>
+template <typename T, int vec_size, int LOOP = 1000>
 float threads_copy(T *in, T *out, int n, gpuStream_t s) {
     int block_size = 128;
     int block_work_size = block_size * vec_size;
@@ -89,13 +89,16 @@ float threads_copy(T *in, T *out, int n, gpuStream_t s) {
     gpuEventCreate(&stop);
     gpuEventRecord(start);
 
-    threads_copy_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, s>>>(in, out);
+    for (int i = 0; i < LOOP; ++i) {
+        threads_copy_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, s>>>(in, out);
+    }
     gpuDeviceSynchronize();
 
     gpuEventRecord(stop);
     gpuEventSynchronize(stop);
     float ms = 0;
     gpuEventElapsedTime(&ms, start, stop);
+    ms /= LOOP;
     return ms;
 }
 
