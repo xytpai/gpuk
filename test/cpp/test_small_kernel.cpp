@@ -30,6 +30,13 @@
 #define gpuStreamCreate hipStreamCreate
 #define gpuStreamDestroy hipStreamDestroy
 #define gpuStreamSynchronize hipStreamSynchronize
+#define gpuGraph_t hipGraph_t
+#define gpuGraphExec_t hipGraphExec_t
+#define gpuStreamBeginCapture hipStreamBeginCapture
+#define gpuStreamEndCapture hipStreamEndCapture
+#define gpuStreamCaptureModeGlobal hipStreamCaptureModeGlobal
+#define gpuGraphInstantiate hipGraphInstantiate
+#define gpuGraphLaunch hipGraphLaunch
 #endif
 
 #if defined(__CUDACC__)
@@ -61,6 +68,13 @@
 #define gpuStreamCreate cudaStreamCreate
 #define gpuStreamDestroy cudaStreamDestroy
 #define gpuStreamSynchronize cudaStreamSynchronize
+#define gpuGraph_t cudaGraph_t
+#define gpuGraphExec_t cudaGraphExec_t
+#define gpuStreamBeginCapture cudaStreamBeginCapture
+#define gpuStreamEndCapture cudaStreamEndCapture
+#define gpuStreamCaptureModeGlobal cudaStreamCaptureModeGlobal
+#define gpuGraphInstantiate cudaGraphInstantiate
+#define gpuGraphLaunch cudaGraphLaunch
 #endif
 
 template <typename scalar_t, int vec_size>
@@ -76,7 +90,7 @@ __global__ void threads_copy_kernel(T *in, T *out) {
 }
 
 template <typename T, int vec_size, int LOOP = 1000>
-float threads_copy(T *in, T *out, int n, gpuStream_t s) {
+float threads_copy(T *in, T *out, int n, gpuStream_t stream) {
     int block_size = 128;
     int block_work_size = block_size * vec_size;
     assert(n % block_work_size == 0);
@@ -84,19 +98,23 @@ float threads_copy(T *in, T *out, int n, gpuStream_t s) {
     dim3 threadsPerBlock(block_size);
     dim3 numBlocks(nblocks);
 
+    gpuGraph_t graph;
+    gpuGraphExec_t exec;
+    gpuStreamBeginCapture(stream, gpuStreamCaptureModeGlobal);
+    for (int i = 0; i < LOOP; ++i) {
+        threads_copy_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, stream>>>(in, out);
+    }
+    gpuStreamEndCapture(stream, &graph);
+    gpuGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+
+    float ms = 0;
     gpuEvent_t start, stop;
     gpuEventCreate(&start);
     gpuEventCreate(&stop);
-    gpuEventRecord(start);
-
-    for (int i = 0; i < LOOP; ++i) {
-        threads_copy_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, s>>>(in, out);
-    }
-    gpuDeviceSynchronize();
-
-    gpuEventRecord(stop);
+    gpuEventRecord(start, stream);
+    gpuGraphLaunch(exec, stream);
+    gpuEventRecord(stop, stream);
     gpuEventSynchronize(stop);
-    float ms = 0;
     gpuEventElapsedTime(&ms, start, stop);
     ms /= LOOP;
     return ms;
@@ -115,9 +133,12 @@ void test_threads_copy(int n) {
     gpuMemcpy(in_gpu, in_cpu, n * sizeof(scalar_t), gpuMemcpyHostToDevice);
     gpuDeviceSynchronize();
 
+    gpuStream_t stream;
+    gpuStreamCreate(&stream);
+
     float timems;
     for (int i = 0; i < 3; i++)
-        timems = threads_copy<scalar_t, vec_size>(in_gpu, out_gpu, n, 0);
+        timems = threads_copy<scalar_t, vec_size>(in_gpu, out_gpu, n, stream);
     std::cout << "timeus:" << timems * 1000 << " throughput:";
 
     float total_GBytes = (n + n) * sizeof(scalar_t) / 1000.0 / 1000.0;
@@ -130,7 +151,8 @@ void test_threads_copy(int n) {
         auto diff = (float)out_cpu[i] - (float)in_cpu[i];
         diff = diff > 0 ? diff : -diff;
         if (diff > 0.01) {
-            std::cout << "error: " << "ref:" << (float)in_cpu[i] << ", actual:" << (float)out_cpu[i] << "\n";
+            std::cout << "error: "
+                      << "ref:" << (float)in_cpu[i] << ", actual:" << (float)out_cpu[i] << "\n";
             return;
         }
     }
@@ -146,10 +168,6 @@ int main() {
     constexpr int vec_size = 4;
     int n;
     n = 128 * vec_size;
-    std::cout << n << " bytes small copy kernel test ...\n";
-    test_threads_copy<float, vec_size>(n);
-    test_threads_copy<float, vec_size>(n);
-    n = 256 * vec_size;
     std::cout << n << " bytes small copy kernel test ...\n";
     test_threads_copy<float, vec_size>(n);
     test_threads_copy<float, vec_size>(n);
