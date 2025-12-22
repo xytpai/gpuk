@@ -168,7 +168,7 @@ int main() {
     constexpr int vec_size = 4;
     int n;
     n = 128 * vec_size;
-    std::cout << n << " bytes small copy kernel test ...\n";
+    std::cout << n * sizeof(float) << " bytes small copy kernel test ...\n";
     test_threads_copy<float, vec_size>(n);
     test_threads_copy<float, vec_size>(n);
 }
