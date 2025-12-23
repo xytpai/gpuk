@@ -77,6 +77,18 @@
 #define gpuGraphLaunch cudaGraphLaunch
 #endif
 
+template <int LOOP>
+__global__ void fmad_loop_kernel(float *x) {
+    int index = threadIdx.x + blockIdx.x * blockDim.x;
+    float a = x[index], b = -1.0f;
+    for (int i = 0; i < LOOP; i++) {
+        for (int j = 0; j < LOOP; j++) {
+            a = a * b + b;
+        }
+    }
+    x[index] = a;
+}
+
 template <typename scalar_t, int vec_size>
 struct alignas(sizeof(scalar_t) * vec_size) aligned_array {
     scalar_t val[vec_size];
@@ -90,7 +102,15 @@ __global__ void threads_copy_kernel(T *in, T *out) {
 }
 
 template <typename T, int vec_size, int LOOP = 1000>
-float threads_copy(T *in, T *out, int n, gpuStream_t stream) {
+float threads_copy(T *in, T *out, int n, gpuStream_t stream, bool add_preprocessing = false) {
+    constexpr int _block_size = 256;
+    constexpr int _num_blocks = 2048;
+    dim3 _threadsPerBlock(_block_size);
+    dim3 _numBlocks(_num_blocks);
+    constexpr int _n = _block_size * _num_blocks;
+    float *_dx;
+    gpuMalloc(&_dx, _n * sizeof(float));
+
     int block_size = 128;
     int block_work_size = block_size * vec_size;
     assert(n % block_work_size == 0);
@@ -101,6 +121,9 @@ float threads_copy(T *in, T *out, int n, gpuStream_t stream) {
     gpuGraph_t graph;
     gpuGraphExec_t exec;
     gpuStreamBeginCapture(stream, gpuStreamCaptureModeGlobal);
+    if (add_preprocessing) {
+        fmad_loop_kernel<1000><<<_numBlocks, _threadsPerBlock, 0, stream>>>(_dx);
+    }
     for (int i = 0; i < LOOP; ++i) {
         threads_copy_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, stream>>>(in, out);
     }
