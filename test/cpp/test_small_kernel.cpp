@@ -127,35 +127,30 @@ float threads_inc(T *in, int n, gpuStream_t stream, int LOOP) {
 
 template <typename scalar_t, int vec_size>
 void test_threads_inc(int n, int LOOP) {
-    auto in_cpu = new scalar_t[n];
-    for (int i = 0; i < n; i++)
+    auto in_cpu = new scalar_t[LOOP * n];
+    for (int i = 0; i < LOOP * n; ++i) {
         in_cpu[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+    }
 
     scalar_t *in_gpu;
-    gpuMalloc(&in_gpu, 3 * LOOP * n * sizeof(scalar_t));
-    for (int i = 0; i < 3 * LOOP; ++i) {
-        gpuMemcpy(in_gpu + i * n, in_cpu, n * sizeof(scalar_t), gpuMemcpyHostToDevice);
-    }
-    gpuMemcpy(in_gpu, in_cpu, n * sizeof(scalar_t), gpuMemcpyHostToDevice);
+    gpuMalloc(&in_gpu, LOOP * n * sizeof(scalar_t));
+    gpuMemcpy(in_gpu, in_cpu, LOOP * n * sizeof(scalar_t), gpuMemcpyHostToDevice);
     gpuDeviceSynchronize();
 
     gpuStream_t stream;
     gpuStreamCreate(&stream);
 
-    float timems;
-    for (int i = 0; i < 3; i++) {
-        timems = threads_inc<scalar_t, vec_size>(in_gpu + i * LOOP * n, n, stream, LOOP);
-    }
+    float timems = threads_inc<scalar_t, vec_size>(in_gpu, n, stream, LOOP);
     std::cout << "timeus:" << timems * 1000 << " throughput:";
 
     float total_GBytes = (n + n) * sizeof(scalar_t) / 1000.0 / 1000.0;
     std::cout << total_GBytes / (timems) << " GBPS val:";
 
-    auto out_cpu = new scalar_t[n];
-    gpuMemcpy(out_cpu, in_gpu + 3 * LOOP * n - n, n * sizeof(scalar_t), gpuMemcpyDeviceToHost);
+    auto out_cpu = new scalar_t[LOOP * n];
+    gpuMemcpy(out_cpu, in_gpu, LOOP * n * sizeof(scalar_t), gpuMemcpyDeviceToHost);
     gpuDeviceSynchronize();
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < LOOP * n; i++) {
         float out = (float)out_cpu[i];
         float ref = (float)in_cpu[i] + 1;
         auto diff = out - ref;
