@@ -95,7 +95,7 @@ __global__ void threads_inc_kernel(T *in) {
 }
 
 template <typename T, int vec_size>
-float threads_inc(T *in, int n, gpuStream_t stream, int LOOP) {
+float threads_inc(T *in, T *in_capture, int n, gpuStream_t stream, int LOOP) {
     int block_size = 256;
     int block_work_size = block_size * vec_size;
     assert(n % block_work_size == 0);
@@ -103,21 +103,26 @@ float threads_inc(T *in, int n, gpuStream_t stream, int LOOP) {
     dim3 threadsPerBlock(block_size);
     dim3 numBlocks(nblocks);
 
-    gpuGraph_t graph;
-    gpuGraphExec_t exec;
-    gpuStreamBeginCapture(stream, gpuStreamCaptureModeGlobal);
-    for (int i = 0; i < LOOP; ++i) {
-        threads_inc_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, stream>>>(in + i * n);
-    }
-    gpuStreamEndCapture(stream, &graph);
-    gpuGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    // gpuGraph_t graph;
+    // gpuGraphExec_t exec;
+    // gpuStreamBeginCapture(stream, gpuStreamCaptureModeGlobal);
+    // for (int i = 0; i < LOOP; ++i) {
+    //     threads_inc_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, stream>>>(in_capture + i * n);
+    // }
+    // gpuStreamEndCapture(stream, &graph);
+    // gpuGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
 
     float ms = 0;
     gpuEvent_t start, stop;
     gpuEventCreate(&start);
     gpuEventCreate(&stop);
     gpuEventRecord(start, stream);
-    gpuGraphLaunch(exec, stream);
+    // gpuGraphLaunch(exec, stream);
+
+    for (int i = 0; i < LOOP; ++i) {
+        threads_inc_kernel<T, vec_size><<<numBlocks, threadsPerBlock, 0, stream>>>(in + i * n);
+    }
+
     gpuEventRecord(stop, stream);
     gpuEventSynchronize(stop);
     gpuEventElapsedTime(&ms, start, stop);
@@ -132,15 +137,16 @@ void test_threads_inc(int n, int LOOP) {
         in_cpu[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
     }
 
-    scalar_t *in_gpu;
+    scalar_t *in_gpu, *in_gpu_capture;
     gpuMalloc(&in_gpu, LOOP * n * sizeof(scalar_t));
+    gpuMalloc(&in_gpu_capture, LOOP * n * sizeof(scalar_t));
     gpuMemcpy(in_gpu, in_cpu, LOOP * n * sizeof(scalar_t), gpuMemcpyHostToDevice);
     gpuDeviceSynchronize();
 
     gpuStream_t stream;
     gpuStreamCreate(&stream);
 
-    float timems = threads_inc<scalar_t, vec_size>(in_gpu, n, stream, LOOP);
+    float timems = threads_inc<scalar_t, vec_size>(in_gpu, in_gpu_capture, n, stream, LOOP);
     std::cout << "timeus:" << timems * 1000 << " throughput:";
 
     float total_GBytes = (n + n) * sizeof(scalar_t) / 1000.0 / 1000.0;
@@ -164,6 +170,7 @@ void test_threads_inc(int n, int LOOP) {
     std::cout << "ok\n";
 
     gpuFree(in_gpu);
+    gpuFree(in_gpu_capture);
     delete[] in_cpu;
     delete[] out_cpu;
 }
