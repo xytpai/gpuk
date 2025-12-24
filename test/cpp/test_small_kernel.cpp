@@ -94,8 +94,8 @@ __global__ void threads_inc_kernel(T *in) {
     reinterpret_cast<vec_t *>(in)[idx] = vec;
 }
 
-template <typename T, int vec_size, int LOOP>
-float threads_inc(T *in, int n, gpuStream_t stream) {
+template <typename T, int vec_size>
+float threads_inc(T *in, int n, gpuStream_t stream, int LOOP) {
     int block_size = 128;
     int block_work_size = block_size * vec_size;
     assert(n % block_work_size == 0);
@@ -125,8 +125,8 @@ float threads_inc(T *in, int n, gpuStream_t stream) {
     return ms;
 }
 
-template <typename scalar_t, int vec_size, int LOOP = 1000>
-void test_threads_inc(int n) {
+template <typename scalar_t, int vec_size>
+void test_threads_inc(int n, int LOOP) {
     auto in_cpu = new scalar_t[n];
     for (int i = 0; i < n; i++)
         in_cpu[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
@@ -141,7 +141,7 @@ void test_threads_inc(int n) {
 
     float timems;
     for (int i = 0; i < 3; i++)
-        timems = threads_inc<scalar_t, vec_size, LOOP>(in_gpu, n, stream);
+        timems = threads_inc<scalar_t, vec_size>(in_gpu, n, stream, LOOP);
     std::cout << "timeus:" << timems * 1000 << " throughput:";
 
     float total_GBytes = (n + n) * sizeof(scalar_t) / 1000.0 / 1000.0;
@@ -169,11 +169,12 @@ void test_threads_inc(int n) {
     delete[] out_cpu;
 }
 
-int main() {
+int main(int argc, char **argv) {
     constexpr int vec_size = 4;
     int n;
     n = 128 * vec_size;
-    std::cout << n * sizeof(float) << " bytes small inc kernel test ...\n";
-    test_threads_inc<float, vec_size>(n);
-    test_threads_inc<float, vec_size>(n);
+    int LOOP = std::stoi(argv[1]);
+    std::cout << n * sizeof(float) << " bytes small inc kernel test with LOOP=" << LOOP << " ...\n";
+    test_threads_inc<float, vec_size>(n, LOOP);
+    test_threads_inc<float, vec_size>(n, LOOP);
 }
