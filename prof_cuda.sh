@@ -1,1 +1,1 @@
-ncu --cache-control none --set full --export report.ncu-rep $@
+ncu --cache-control all --set full --export report.ncu-rep $@
