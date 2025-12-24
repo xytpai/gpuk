@@ -1,5 +1,6 @@
 #include <cassert>
 #include <iostream>
+#include <cstring>
 
 #if defined(__HIPCC__)
 #include <hip/hip_runtime.h>
@@ -130,7 +131,7 @@ void test_threads_inc(int n, int LOOP) {
     constexpr int FLUSH_SIZE = 1024 * 1024 * 1024;
     auto in_cpu = new scalar_t[LOOP * n];
     auto flush_data = new char[FLUSH_SIZE];
-    memset(flush_data, 1, FLUSH_SIZE);
+    std::memset(flush_data, 1, FLUSH_SIZE);
     for (int i = 0; i < LOOP * n; ++i) {
         in_cpu[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
     }
