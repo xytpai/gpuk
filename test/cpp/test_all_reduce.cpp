@@ -609,8 +609,10 @@ int main() {
 
     {
         std::vector<int> sizes = {
-            14500 * 4096,
-            14500 * 4096,
+            8192 * 4096,
+            8192 * 4096,
+            8192 * 4096,
+            8192 * 4096,
         };
         using T = __bfloat16;
         for (auto size : sizes) {
