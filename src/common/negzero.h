@@ -17,7 +17,7 @@ struct neg_zero<__half> {
 template <>
 struct neg_zero<__bfloat16> {
     static constexpr unsigned short neg_zero_bits = 0x8000U;
-    static constexpr __bfloat16 value = __hip_bfloat16_raw{neg_zero_bits};
+    static constexpr __bfloat16 value = __bfloat16_raw{neg_zero_bits};
     using bits_type = unsigned short;
 };
 

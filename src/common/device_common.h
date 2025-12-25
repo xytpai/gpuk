@@ -62,6 +62,7 @@
 #define gpuLaunchCooperativeKernel hipLaunchCooperativeKernel
 
 #define __bfloat16 __hip_bfloat16
+#define __bfloat16_raw __hip_bfloat16_raw
 
 #define gpuIpcMemHandle_t hipIpcMemHandle_t
 #define gpuIpcGetMemHandle hipIpcGetMemHandle
@@ -122,6 +123,7 @@
 #define gpuLaunchCooperativeKernel cudaLaunchCooperativeKernel
 
 #define __bfloat16 __nv_bfloat16
+#define __bfloat16_raw __nv_bfloat16_raw
 
 #define gpuIpcMemHandle_t cudaIpcMemHandle_t
 #define gpuIpcGetMemHandle cudaIpcGetMemHandle

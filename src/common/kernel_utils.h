@@ -46,39 +46,6 @@ struct alignas(sizeof(T) * VEC_SIZE) vec_t {
     __device__ __forceinline__ void store(T *ptr) {
         *reinterpret_cast<vec_t<T, VEC_SIZE> *>(ptr) = *this;
     }
-    __device__ __forceinline__ void nontemporal_load(const T *ptr) {
-        constexpr int ITERS = VEC_SIZE * sizeof(T) / sizeof(uint32_t);
-#pragma unroll
-        for (int i = 0; i < ITERS; ++i) {
-            reinterpret_cast<uint32_t *>(&data)[i] =
-                __builtin_nontemporal_load((uint32_t *)ptr + i);
-        }
-    }
-    __device__ __forceinline__ void nontemporal_store(T *ptr) {
-        constexpr int ITERS = VEC_SIZE * sizeof(T) / sizeof(uint32_t);
-#pragma unroll
-        for (int i = 0; i < ITERS; ++i) {
-            __builtin_nontemporal_store(reinterpret_cast<uint32_t *>(&data)[i],
-                                        (uint32_t *)ptr + i);
-        }
-    }
-    __device__ __forceinline__ void volatile_load(const T *ptr) {
-        constexpr int ITERS = VEC_SIZE * sizeof(T) / sizeof(uint32_t);
-#pragma unroll
-        for (int i = 0; i < ITERS; ++i) {
-            reinterpret_cast<uint32_t *>(&data)[i] = __scoped_atomic_load_n(
-                (uint32_t *)ptr + i, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
-        }
-    }
-    __device__ __forceinline__ void volatile_store(T *ptr) {
-        constexpr int ITERS = VEC_SIZE * sizeof(T) / sizeof(uint32_t);
-#pragma unroll
-        for (int i = 0; i < ITERS; ++i) {
-            __scoped_atomic_store_n((uint32_t *)ptr + i,
-                                    reinterpret_cast<uint32_t *>(&data)[i],
-                                    __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-        }
-    }
     __device__ __forceinline__ void fill(T val) {
 #pragma unroll
         for (int i = 0; i < VEC_SIZE; ++i) {
