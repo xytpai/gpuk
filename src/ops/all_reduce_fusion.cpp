@@ -102,7 +102,7 @@ public:
         delete[] cptrs;
     }
 
-    std::tuple<CommMeta, CommPtrs *> get_comm_data(const Tensor &input, gpuStream_t stream) {
+    std::tuple<CommMeta, CommPtrs *> get_comm_data(const Tensor &input, gpuStream_t stream, bool pre_copy = true) {
         int64_t size = input.numel() * input.element_size();
         void *ptr = (void *)input.data_ptr();
 
@@ -127,7 +127,9 @@ public:
                 cptrs = comm_ptrs_ + used_comm_ptrs_ + unregistered_ptrs_.size() - 1;
             } else {
                 cptrs = comm_ptrs_ + 0;
-                gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
+                if (pre_copy) {
+                    gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
+                }
             }
         }
 
@@ -351,7 +353,7 @@ void allreduce_inplace(fptr_t fptr, Tensor &input) {
 #endif
     int size = input.numel();
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    auto comm_data = ptr->get_comm_data(input, stream);
+    auto comm_data = ptr->get_comm_data(input, stream, false);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         kHalf,
         kBFloat16,

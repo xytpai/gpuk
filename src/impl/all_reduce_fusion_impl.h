@@ -37,10 +37,10 @@ struct AllReduceFusionParams {
 
 // ========================================= allreduce =========================================
 
-template <typename T, int NRanks, int BLOCK_SIZE>
+template <typename T, int NRanks, int BLOCK_SIZE, int BYTES_PER_ACCESS>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_inplace_kernel_2stage(
     AllReduceFusionParams<T> params, CommDeviceMeta<NRanks> meta, CommPtrs *cptrs) {
-    constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int VEC_SIZE = BYTES_PER_ACCESS / sizeof(T);
     constexpr int BLOCK_WORK_SIZE = BLOCK_SIZE * VEC_SIZE;
     constexpr int WARP_SIZE_ = BLOCK_SIZE / NRanks;
     SyncComm<NRanks> comm(meta);
@@ -49,7 +49,14 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_inplace_kernel_2stage
     int lane_id = threadIdx.x % WARP_SIZE_;
     vec_t<T, VEC_SIZE> val;
     vec_t<float, VEC_SIZE> acc;
-    comm.template sync<true, false>();
+    for (
+        int idx = (blockIdx.x * BLOCK_SIZE + threadIdx.x) * VEC_SIZE;
+        idx < params.size;
+        idx += gridDim.x * BLOCK_SIZE * VEC_SIZE) {
+        val.load(reinterpret_cast<T *>(params.allreduce_in) + idx);
+        val.store(reinterpret_cast<T *>(cptrs->data_ptrs[0]) + idx);
+    }
+    comm.template sync<false, false>();
     for (
         int idx = ((blockIdx.x * NRanks + params.rank) * WARP_SIZE_ + lane_id) * VEC_SIZE;
         idx < params.size;
@@ -80,22 +87,29 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_inplace_kernel_2stage
         val.load(&shared[0] + lane_id * VEC_SIZE);
         val.store(reinterpret_cast<T *>(cptrs->data_ptrs[warp_id]) + idx);
     }
-    comm.template sync<true, true>();
+    comm.template sync<false, true>();
+    for (
+        int idx = (blockIdx.x * BLOCK_SIZE + threadIdx.x) * VEC_SIZE;
+        idx < params.size;
+        idx += gridDim.x * BLOCK_SIZE * VEC_SIZE) {
+        val.load(reinterpret_cast<T *>(cptrs->data_ptrs[0]) + idx);
+        val.store(reinterpret_cast<T *>(params.allreduce_in) + idx);
+    }
 }
 
-template <typename T, int NRanks, int BLOCK_SIZE>
+template <typename T, int NRanks, int BLOCK_SIZE = 512, int BYTES_PER_ACCESS = 16>
 void allreduce_inplace_kernel_2stage_launcher(
     AllReduceFusionParams<T> const &params,
     CommDeviceMeta<NRanks> const &meta,
     CommPtrs *cptrs,
     gpuStream_t stream) {
-    constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int VEC_SIZE = BYTES_PER_ACCESS / sizeof(T);
     constexpr int BLOCK_WORK_SIZE = BLOCK_SIZE * VEC_SIZE;
     dim3 threadsPerBlock(BLOCK_SIZE);
     int nblocks = (params.size + BLOCK_WORK_SIZE - 1) / BLOCK_WORK_SIZE;
     nblocks = std::min(nblocks, NBLOCKS_PER_GPU);
     dim3 numBlocks(nblocks);
-    allreduce_inplace_kernel_2stage<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
+    allreduce_inplace_kernel_2stage<T, NRanks, BLOCK_SIZE, BYTES_PER_ACCESS><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
 }
 
 template <typename T>
@@ -105,16 +119,16 @@ void allreduce_inplace_impl(CommMeta meta, CommPtrs *cptrs, void *allreduce_in, 
     params.rank = meta.rank;
     params.size = size;
     params.allreduce_in = allreduce_in;
-#define DISPATCH_NRANKS(NRANKS)                                                                 \
-    {                                                                                           \
-        CommDeviceMeta<NRANKS> dmeta;                                                           \
-        for (int i = 0; i < NRANKS; ++i) {                                                      \
-            dmeta.barrier_flag_ptrs[i] = meta.barrier_flag_ptrs[i];                             \
-        }                                                                                       \
-        dmeta.sync_clock = meta.sync_clock;                                                     \
-        dmeta.rank = meta.rank;                                                                 \
-        dmeta.nranks = meta.nranks;                                                             \
-        allreduce_inplace_kernel_2stage_launcher<T, NRANKS, 256>(params, dmeta, cptrs, stream); \
+#define DISPATCH_NRANKS(NRANKS)                                                            \
+    {                                                                                      \
+        CommDeviceMeta<NRANKS> dmeta;                                                      \
+        for (int i = 0; i < NRANKS; ++i) {                                                 \
+            dmeta.barrier_flag_ptrs[i] = meta.barrier_flag_ptrs[i];                        \
+        }                                                                                  \
+        dmeta.sync_clock = meta.sync_clock;                                                \
+        dmeta.rank = meta.rank;                                                            \
+        dmeta.nranks = meta.nranks;                                                        \
+        allreduce_inplace_kernel_2stage_launcher<T, NRANKS>(params, dmeta, cptrs, stream); \
     }
     int nranks = meta.nranks;
     if (nranks == 8) {
