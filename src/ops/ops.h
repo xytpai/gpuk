@@ -17,10 +17,13 @@ void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<Tensor> handles);
 void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles);
 
 void ar_fusion_capture_clear(fptr_t fptr);
+Tensor get_ar_fusion_tensor_handle(fptr_t fptr, Tensor &input);
+int64_t get_ar_fusion_tensor_offset(fptr_t fptr, Tensor &input);
 std::vector<Tensor> get_ar_fusion_captured_handles(fptr_t fptr);
 Tensor get_ar_fusion_captured_offsets(fptr_t fptr);
 void open_ar_fusion_captured_handles(fptr_t fptr, std::vector<Tensor> handles, std::vector<int64_t> offsets, int64_t ptr_idx);
 
+void allreduce_inplace(fptr_t fptr, Tensor &input, std::vector<Tensor> handles, std::vector<int64_t> offsets);
 void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,
                    double eps, int64_t quant_type);

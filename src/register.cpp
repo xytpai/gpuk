@@ -19,6 +19,12 @@ TORCH_LIBRARY(gpuk, m) {
 
     m.def("ar_fusion_capture_clear(SymInt fptr) -> ()");
     m.impl("ar_fusion_capture_clear", &ar_fusion_capture_clear);
+
+    m.def("get_ar_fusion_tensor_handle(SymInt fptr, Tensor input) -> Tensor");
+    m.impl("get_ar_fusion_tensor_handle", &get_ar_fusion_tensor_handle);
+    m.def("get_ar_fusion_tensor_offset(SymInt fptr, Tensor input) -> int");
+    m.impl("get_ar_fusion_tensor_offset", &get_ar_fusion_tensor_offset);
+
     m.def("get_ar_fusion_captured_handles(SymInt fptr) -> Tensor[]");
     m.impl("get_ar_fusion_captured_handles", &get_ar_fusion_captured_handles);
     m.def("get_ar_fusion_captured_offsets(SymInt fptr) -> Tensor");
@@ -26,6 +32,7 @@ TORCH_LIBRARY(gpuk, m) {
     m.def("open_ar_fusion_captured_handles(SymInt fptr, Tensor[] handles, int[] offsets, SymInt ptr_idx) -> ()");
     m.impl("open_ar_fusion_captured_handles", &open_ar_fusion_captured_handles);
 
+    m.def("allreduce_inplace(SymInt fptr, Tensor input, Tensor[] handles, int[] offsets) -> ()");
     m.def("allreduce_rms(SymInt fptr, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
           "norm_out, Tensor scale_out, float eps, SymInt quant_type) -> ()");
@@ -42,6 +49,7 @@ TORCH_LIBRARY(gpuk, m) {
 }
 
 TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
+    m.impl("allreduce_inplace", &allreduce_inplace);
     m.impl("allreduce_rms", &allreduce_rms);
     m.impl("fused_rope_rms", &fused_rope_rms);
     m.impl("fused_mrope_3d_rms", &fused_mrope_3d_rms);

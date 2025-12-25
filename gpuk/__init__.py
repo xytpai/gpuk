@@ -22,9 +22,12 @@ get_ar_fusion_data_handle = eval(f"{prefix}.get_ar_fusion_data_handle")
 open_ar_fusion_barrier_handles = eval(f"{prefix}.open_ar_fusion_barrier_handles")
 open_ar_fusion_data_handles = eval(f"{prefix}.open_ar_fusion_data_handles")
 ar_fusion_capture_clear = eval(f"{prefix}.ar_fusion_capture_clear")
+get_ar_fusion_tensor_handle = eval(f"{prefix}.get_ar_fusion_tensor_handle")
+get_ar_fusion_tensor_offset = eval(f"{prefix}.get_ar_fusion_tensor_offset")
 get_ar_fusion_captured_handles = eval(f"{prefix}.get_ar_fusion_captured_handles")
 get_ar_fusion_captured_offsets = eval(f"{prefix}.get_ar_fusion_captured_offsets")
 open_ar_fusion_captured_handles = eval(f"{prefix}.open_ar_fusion_captured_handles")
+allreduce_inplace = eval(f"{prefix}.allreduce_inplace")
 allreduce_rms = eval(f"{prefix}.allreduce_rms")
 fused_rope_rms = eval(f"{prefix}.fused_rope_rms")
 fused_mrope_3d_rms = eval(f"{prefix}.fused_mrope_3d_rms")
@@ -127,6 +130,26 @@ class GPUKDistEnv:
     def __del__(self):
         if self.fptr:
             destroy_ar_fusion(self.fptr)
+    
+    def allreduce_native(self, allreduce_in):
+        allreduce_out = allreduce_in.clone()
+        dist.all_reduce(allreduce_out, group=self.group)
+        return allreduce_out
+        
+    def allreduce(self, allreduce_in):
+        allreduce_out = allreduce_in.clone()
+        handle = get_ar_fusion_tensor_handle(self.fptr, allreduce_out)
+        offset = get_ar_fusion_tensor_offset(self.fptr, allreduce_out)
+        handle_list = [None] * self.world_size
+        offset_list = [None] * self.world_size
+        dist.all_gather_object(handle_list, handle, group=self.group)
+        dist.all_gather_object(offset_list, offset, group=self.group)
+        allreduce_inplace(
+            self.fptr,
+            allreduce_out,
+            handle_list,
+            offset_list)
+        return allreduce_out
 
     def allreduce_add_rms_native(
         self, allreduce_in, residual_in, rms_weight, eps, fp8_out=False

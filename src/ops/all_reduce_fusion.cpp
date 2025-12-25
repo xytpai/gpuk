@@ -98,7 +98,7 @@ public:
             }
         }
         gpuMemcpy(comm_ptrs_, cptrs, comm_ptrs_buf_len_ * sizeof(CommPtrs), gpuMemcpyHostToDevice);
-        used_comm_ptrs_ = 1;
+        used_comm_ptrs_ = 2;
         delete[] cptrs;
     }
 
@@ -134,9 +134,53 @@ public:
         return {meta, cptrs};
     }
 
+    std::tuple<CommMeta, CommPtrs *> get_comm_data(const Tensor &input, std::vector<Tensor> &handles, std::vector<int64_t> &offsets, gpuStream_t stream) {
+        int64_t size = input.numel() * input.element_size();
+        void *ptr = (void *)input.data_ptr();
+        void *base_ptr;
+        ipc_details::create_base_ptr(&base_ptr, ptr);
+
+        CommMeta meta;
+        for (int r = 0; r < world_size_; ++r) {
+            meta.barrier_flag_ptrs[r] = ipc_barrier_flags_[r];
+        }
+        meta.sync_clock = sync_clock_;
+        meta.rank = rank_;
+        meta.nranks = world_size_;
+
+        std::vector<void *> ipc_data;
+        ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
+        CommPtrs cptrs;
+        for (int i = 0; i < offsets.size(); ++i) {
+            ipc_data[i] = (void *)((char *)ipc_data[i] + offsets[i]);
+        }
+        for (int i = 0; i < offsets.size(); ++i) {
+            int r = round_robin_ ? ((rank_ + i) % world_size_) : i;
+            cptrs.data_ptrs[i] = ipc_data[r];
+        }
+        CommPtrs *_cptrs = comm_ptrs_ + 1;
+        gpuMemcpyAsync(_cptrs, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice, stream);
+        return {meta, _cptrs};
+    }
+
     void capture_clear() {
         unregistered_ptrs_.clear();
         unregistered_base_ptrs_.clear();
+    }
+
+    Tensor get_tensor_handle(Tensor &input) {
+        void *ptr = (void *)input.data_ptr();
+        void *base_ptr;
+        ipc_details::create_base_ptr(&base_ptr, ptr);
+        return ipc_details::get_handle(base_ptr);
+    }
+
+    int64_t get_tensor_offset(Tensor &input) {
+        void *ptr = (void *)input.data_ptr();
+        void *base_ptr;
+        ipc_details::create_base_ptr(&base_ptr, ptr);
+        int64_t offset = ((char *)ptr) - ((char *)base_ptr);
+        return offset;
     }
 
     std::vector<Tensor> get_captured_handles() {
@@ -251,6 +295,16 @@ void ar_fusion_capture_clear(fptr_t fptr) {
     ptr->capture_clear();
 }
 
+Tensor get_ar_fusion_tensor_handle(fptr_t fptr, Tensor &input) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    return ptr->get_tensor_handle(input);
+}
+
+int64_t get_ar_fusion_tensor_offset(fptr_t fptr, Tensor &input) {
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    return ptr->get_tensor_offset(input);
+}
+
 std::vector<Tensor> get_ar_fusion_captured_handles(fptr_t fptr) {
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
     return ptr->get_captured_handles();
@@ -286,6 +340,31 @@ struct KernelElementType<c10::BFloat16> {
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 #endif
+
+void allreduce_inplace(fptr_t fptr, Tensor &input, std::vector<Tensor> handles, std::vector<int64_t> offsets) {
+    TORCH_CHECK(input.is_contiguous());
+    auto dev = input.device();
+    c10::DeviceGuard dev_guard(dev);
+#ifdef __CUDACC__
+#else
+    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+#endif
+    int size = input.numel();
+    auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
+    auto comm_data = ptr->get_comm_data(input, handles, offsets, stream);
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        kHalf,
+        kBFloat16,
+        input.scalar_type(),
+        "allreduce_inplace", [&] {
+            using k_scalar_t = KernelElementType<scalar_t>::type;
+            allreduce_inplace_impl<k_scalar_t>(
+                std::get<0>(comm_data),
+                std::get<1>(comm_data),
+                size,
+                stream);
+        });
+}
 
 void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
                    Tensor &rms_gamma, Tensor &residual_out, Tensor &norm_out, Tensor &scale_out,

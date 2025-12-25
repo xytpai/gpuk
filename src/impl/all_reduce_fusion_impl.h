@@ -4,99 +4,11 @@
 
 using namespace std;
 using namespace kernel_utils;
+using namespace comm_utils;
 namespace cg = cooperative_groups;
 
 #define WARP_SIZE 32
-#define MAX_RANKS 8
-#define NBLOCKS_PER_GPU 256
 #define CHECK_FAIL assert
-
-namespace details {
-
-static constexpr int kBytesPerAccess = 16;
-
-template <bool RELAXED = true>
-__device__ __forceinline__ void st_flag(int *addr, int flag) {
-#ifdef __CUDACC__
-    asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(addr));
-#else
-    __scoped_atomic_store_n(addr, flag,
-                            RELAXED ? __ATOMIC_RELAXED : __ATOMIC_RELEASE,
-                            __MEMORY_SCOPE_SYSTEM);
-#endif
-}
-
-template <bool RELAXED = true>
-__device__ __forceinline__ int ld_flag(int *addr) {
-    int flag;
-#ifdef __CUDACC__
-    asm volatile("ld.global.acquire.sys.b32 %0, [%1];"
-                 : "=r"(flag)
-                 : "l"(addr));
-#else
-    flag = __scoped_atomic_load_n(addr,
-                                  RELAXED ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
-                                  __MEMORY_SCOPE_SYSTEM);
-#endif
-    return flag;
-}
-
-} // namespace details
-
-template <int NRanks>
-struct CommDeviceMeta {
-    void *barrier_flag_ptrs[NRanks];
-    void *sync_clock;
-    int rank;
-    int nranks;
-};
-
-struct CommMeta {
-    void *barrier_flag_ptrs[MAX_RANKS];
-    void *sync_clock;
-    int rank;
-    int nranks;
-};
-
-struct CommPtrs {
-    void *data_ptrs[MAX_RANKS];
-};
-
-template <int NRanks>
-struct SyncComm {
-    __device__ __forceinline__ SyncComm(CommDeviceMeta<NRanks> &meta) {
-        flag_ptr = ((int *)meta.sync_clock) + blockIdx.x;
-        int rank = meta.rank;
-        if (threadIdx.x < NRanks) {
-            int target_rank = threadIdx.x;
-            target_flag = reinterpret_cast<int *>(meta.barrier_flag_ptrs[target_rank]) + blockIdx.x * NRanks + rank;
-            current_flag = reinterpret_cast<int *>(meta.barrier_flag_ptrs[rank]) + blockIdx.x * NRanks + target_rank;
-        }
-        flag = *flag_ptr;
-    }
-
-    template <bool RELAXED = true, bool FINAL = true>
-    __device__ __forceinline__ void sync() {
-        __syncthreads();
-        flag += 1;
-        if (threadIdx.x < NRanks) {
-            details::st_flag<RELAXED>(target_flag, flag);
-            while (details::ld_flag<RELAXED>(current_flag) < flag) {
-            }
-        }
-        __syncthreads();
-        if constexpr (FINAL) {
-            if (threadIdx.x == 0) {
-                *flag_ptr = flag;
-            }
-        }
-    }
-
-    int *flag_ptr;
-    int *target_flag;
-    int *current_flag;
-    int flag;
-};
 
 enum QuantType {
     NONE = 0,
@@ -119,7 +31,104 @@ struct AllReduceFusionParams {
     // per token quant
     QuantType quant_type;
     void *scale_out;
+    // retain
+    void *allreduce_out;
 };
+
+// ========================================= allreduce =========================================
+
+template <typename T, int NRanks, int BLOCK_SIZE>
+__global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_inplace_kernel_2stage(
+    AllReduceFusionParams<T> params, CommDeviceMeta<NRanks> meta, CommPtrs *cptrs) {
+    constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int BLOCK_WORK_SIZE = BLOCK_SIZE * VEC_SIZE;
+    constexpr int WARP_SIZE_ = BLOCK_SIZE / NRanks;
+    SyncComm<NRanks> comm(meta);
+    __shared__ T shared[NRanks * WARP_SIZE_ * VEC_SIZE];
+    int warp_id = threadIdx.x / WARP_SIZE_;
+    int lane_id = threadIdx.x % WARP_SIZE_;
+    vec_t<T, VEC_SIZE> val;
+    vec_t<float, VEC_SIZE> acc;
+    comm.template sync<true, false>();
+    for (
+        int idx = ((blockIdx.x * NRanks + params.rank) * WARP_SIZE_ + lane_id) * VEC_SIZE;
+        idx < params.size;
+        idx += gridDim.x * NRanks * WARP_SIZE_ * VEC_SIZE) {
+        val.load(reinterpret_cast<T *>(cptrs->data_ptrs[warp_id]) + idx);
+        val.store(&shared[0] + threadIdx.x * VEC_SIZE);
+        __syncthreads();
+        if (warp_id == 0) {
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                acc.data[v] = (float)val.data[v];
+            }
+#pragma unroll
+            for (int r = 1; r < NRanks; ++r) {
+                val.load(&shared[0] + (r * WARP_SIZE_ + lane_id) * VEC_SIZE);
+#pragma unroll
+                for (int v = 0; v < VEC_SIZE; ++v) {
+                    acc.data[v] += (float)val.data[v];
+                }
+            }
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                val.data[v] = (T)acc.data[v];
+            }
+            val.store(&shared[0] + lane_id * VEC_SIZE);
+        }
+        __syncthreads();
+        val.load(&shared[0] + lane_id * VEC_SIZE);
+        val.store(reinterpret_cast<T *>(cptrs->data_ptrs[warp_id]) + idx);
+    }
+    comm.template sync<true, true>();
+}
+
+template <typename T, int NRanks, int BLOCK_SIZE>
+void allreduce_inplace_kernel_2stage_launcher(
+    AllReduceFusionParams<T> const &params,
+    CommDeviceMeta<NRanks> const &meta,
+    CommPtrs *cptrs,
+    gpuStream_t stream) {
+    constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int BLOCK_WORK_SIZE = BLOCK_SIZE * VEC_SIZE;
+    dim3 threadsPerBlock(BLOCK_SIZE);
+    int nblocks = (params.size + BLOCK_WORK_SIZE - 1) / BLOCK_WORK_SIZE;
+    nblocks = std::min(nblocks, NBLOCKS_PER_GPU);
+    dim3 numBlocks(nblocks);
+    allreduce_inplace_kernel_2stage<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
+}
+
+template <typename T>
+void allreduce_inplace_impl(CommMeta meta, CommPtrs *cptrs, int size, gpuStream_t stream = 0) {
+    AllReduceFusionParams<T> params;
+    params.nranks = meta.nranks;
+    params.rank = meta.rank;
+    params.size = size;
+#define DISPATCH_NRANKS(NRANKS)                                                                 \
+    {                                                                                           \
+        CommDeviceMeta<NRANKS> dmeta;                                                           \
+        for (int i = 0; i < NRANKS; ++i) {                                                      \
+            dmeta.barrier_flag_ptrs[i] = meta.barrier_flag_ptrs[i];                             \
+        }                                                                                       \
+        dmeta.sync_clock = meta.sync_clock;                                                     \
+        dmeta.rank = meta.rank;                                                                 \
+        dmeta.nranks = meta.nranks;                                                             \
+        allreduce_inplace_kernel_2stage_launcher<T, NRANKS, 256>(params, dmeta, cptrs, stream); \
+    }
+    int nranks = meta.nranks;
+    if (nranks == 8) {
+        DISPATCH_NRANKS(8)
+    } else if (nranks == 4) {
+        DISPATCH_NRANKS(4)
+    } else if (nranks == 2) {
+        DISPATCH_NRANKS(2)
+    } else {
+        CHECK_FAIL(false);
+    }
+#undef DISPATCH_NRANKS
+}
+
+// ========================================= allreduce fusion =========================================
 
 template <typename T, int VEC_SIZE, typename QuantT>
 __device__ __forceinline__ vec_t<QuantT, VEC_SIZE> convert_to_fp8(vec_t<T, VEC_SIZE> &in_vec, float scale) {
