@@ -99,11 +99,12 @@ void allreduce_inplace_kernel_2stage_launcher(
 }
 
 template <typename T>
-void allreduce_inplace_impl(CommMeta meta, CommPtrs *cptrs, int size, gpuStream_t stream = 0) {
+void allreduce_inplace_impl(CommMeta meta, CommPtrs *cptrs, void *allreduce_in, int size, gpuStream_t stream = 0) {
     AllReduceFusionParams<T> params;
     params.nranks = meta.nranks;
     params.rank = meta.rank;
     params.size = size;
+    params.allreduce_in = allreduce_in;
 #define DISPATCH_NRANKS(NRANKS)                                                                 \
     {                                                                                           \
         CommDeviceMeta<NRANKS> dmeta;                                                           \

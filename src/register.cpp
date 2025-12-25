@@ -32,7 +32,7 @@ TORCH_LIBRARY(gpuk, m) {
     m.def("open_ar_fusion_captured_handles(SymInt fptr, Tensor[] handles, int[] offsets, SymInt ptr_idx) -> ()");
     m.impl("open_ar_fusion_captured_handles", &open_ar_fusion_captured_handles);
 
-    m.def("allreduce_inplace(SymInt fptr, Tensor input, Tensor[] handles, int[] offsets) -> ()");
+    m.def("allreduce_inplace(SymInt fptr, Tensor input) -> ()");
     m.def("allreduce_rms(SymInt fptr, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
           "norm_out, Tensor scale_out, float eps, SymInt quant_type) -> ()");

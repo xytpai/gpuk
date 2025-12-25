@@ -138,17 +138,9 @@ class GPUKDistEnv:
         
     def allreduce(self, allreduce_in):
         allreduce_out = allreduce_in.clone()
-        handle = get_ar_fusion_tensor_handle(self.fptr, allreduce_out)
-        offset = get_ar_fusion_tensor_offset(self.fptr, allreduce_out)
-        handle_list = [None] * self.world_size
-        offset_list = [None] * self.world_size
-        dist.all_gather_object(handle_list, handle, group=self.group)
-        dist.all_gather_object(offset_list, offset, group=self.group)
         allreduce_inplace(
             self.fptr,
-            allreduce_out,
-            handle_list,
-            offset_list)
+            allreduce_out)
         return allreduce_out
 
     def allreduce_add_rms_native(

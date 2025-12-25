@@ -341,7 +341,7 @@ struct KernelElementType<c10::BFloat16> {
 #include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 #endif
 
-void allreduce_inplace(fptr_t fptr, Tensor &input, std::vector<Tensor> handles, std::vector<int64_t> offsets) {
+void allreduce_inplace(fptr_t fptr, Tensor &input) {
     TORCH_CHECK(input.is_contiguous());
     auto dev = input.device();
     c10::DeviceGuard dev_guard(dev);
@@ -351,7 +351,7 @@ void allreduce_inplace(fptr_t fptr, Tensor &input, std::vector<Tensor> handles, 
 #endif
     int size = input.numel();
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
-    auto comm_data = ptr->get_comm_data(input, handles, offsets, stream);
+    auto comm_data = ptr->get_comm_data(input, stream);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         kHalf,
         kBFloat16,
@@ -361,6 +361,7 @@ void allreduce_inplace(fptr_t fptr, Tensor &input, std::vector<Tensor> handles, 
             allreduce_inplace_impl<k_scalar_t>(
                 std::get<0>(comm_data),
                 std::get<1>(comm_data),
+                (void *)input.data_ptr<scalar_t>(),
                 size,
                 stream);
         });
