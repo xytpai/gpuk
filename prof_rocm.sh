@@ -1,2 +1,1 @@
-rocprofv3 --kernel-trace --summary -- $@
-# rocprofv3 --kernel-trace --hip-trace --output-format pftrace -- $@
+rocprofv3 --hip-trace --hsa-trace --output-format pftrace -- $@
