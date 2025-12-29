@@ -350,7 +350,7 @@ void init_communicators(std::vector<Communicator> &communicators) {
 
 template <typename T, int NRanks, int BLOCK_SIZE>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_direct_kernel(int size, CommDeviceMeta<NRanks> meta, CommPtrs cptrs) {
-    static constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
     SyncComm<NRanks> comm(meta);
     using vec_t_ = vec_t<T, VEC_SIZE>;
     using acc_vec_t_ = vec_t<float, VEC_SIZE>;
@@ -386,6 +386,51 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_direct_kernel(int siz
     comm.template sync<true, true>();
 }
 
+template <typename T, int NRanks, int BLOCK_SIZE>
+__global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_inplace_kernel_2stage(int size, CommDeviceMeta<NRanks> meta, CommPtrs cptrs) {
+    constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
+    constexpr int BLOCK_WORK_SIZE = BLOCK_SIZE * VEC_SIZE;
+    constexpr int WARP_SIZE_ = BLOCK_SIZE / NRanks;
+    SyncComm<NRanks> comm(meta);
+    __shared__ T shared[NRanks * WARP_SIZE_ * VEC_SIZE];
+    int warp_id = threadIdx.x / WARP_SIZE_;
+    int lane_id = threadIdx.x % WARP_SIZE_;
+    vec_t<T, VEC_SIZE> val;
+    vec_t<float, VEC_SIZE> acc;
+    comm.template sync<true, false>();
+    for (
+        int idx = ((meta.rank + blockIdx.x * NRanks) * WARP_SIZE_ + lane_id) * VEC_SIZE;
+        idx < size;
+        idx += gridDim.x * NRanks * WARP_SIZE_ * VEC_SIZE) {
+        val.load(reinterpret_cast<T *>(cptrs.data_ptrs[warp_id]) + idx);
+        val.store(&shared[0] + threadIdx.x * VEC_SIZE);
+        __syncthreads();
+        if (warp_id == 0) {
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                acc.data[v] = (float)val.data[v];
+            }
+#pragma unroll
+            for (int r = 1; r < NRanks; ++r) {
+                val.load(&shared[0] + (r * WARP_SIZE_ + lane_id) * VEC_SIZE);
+#pragma unroll
+                for (int v = 0; v < VEC_SIZE; ++v) {
+                    acc.data[v] += (float)val.data[v];
+                }
+            }
+#pragma unroll
+            for (int v = 0; v < VEC_SIZE; ++v) {
+                val.data[v] = (T)acc.data[v];
+            }
+            val.store(&shared[0] + lane_id * VEC_SIZE);
+        }
+        __syncthreads();
+        val.load(&shared[0] + lane_id * VEC_SIZE);
+        val.store(reinterpret_cast<T *>(cptrs.data_ptrs[warp_id]) + idx);
+    }
+    comm.template sync<true, true>();
+}
+
 template <typename T, int NRanks>
 void allreduce_kernel_launcher(T *allreduce_in, T *allreduce_out, int size,
                                CommDeviceMeta<NRanks> &meta, CommPtrs &cptrs,
@@ -398,7 +443,7 @@ void allreduce_kernel_launcher(T *allreduce_in, T *allreduce_out, int size,
     dim3 threadsPerBlock(BLOCK_SIZE);
     dim3 numBlocks(nblocks);
     gpuMemcpyAsync(cptrs.data_ptrs[0], allreduce_in, size * sizeof(T), gpuMemcpyDeviceToDevice, stream);
-    allreduce_direct_kernel<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(size, meta, cptrs);
+    allreduce_inplace_kernel_2stage<T, NRanks, BLOCK_SIZE><<<numBlocks, threadsPerBlock, 0, stream>>>(size, meta, cptrs);
     gpuMemcpyAsync(allreduce_out, cptrs.data_ptrs[0], size * sizeof(T), gpuMemcpyDeviceToDevice, stream);
 }
 
