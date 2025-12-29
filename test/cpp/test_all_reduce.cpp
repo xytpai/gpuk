@@ -116,6 +116,14 @@
 #define gpuStreamCaptureStatusActive cudaStreamCaptureStatusActive
 #endif
 
+#ifndef NBLOCKS_PER_GPU
+#define NBLOCKS_PER_GPU 256
+#endif
+
+#ifndef THREADS_PER_BLOCK
+#define THREADS_PER_BLOCK 256
+#endif
+
 namespace test {
 
 namespace comm_utils {
@@ -200,7 +208,6 @@ inline int enable_p2p() {
 }
 
 static constexpr int MAX_RANKS = 8;
-static constexpr int NBLOCKS_PER_GPU = 80;
 
 template <int NRanks>
 struct CommDeviceMeta {
@@ -435,7 +442,7 @@ void allreduce_kernel_launcher(T *allreduce_in, T *allreduce_out, int size,
                                CommDeviceMeta<NRanks> &meta, CommPtrs &cptrs,
                                gpuStream_t stream) {
     constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-    constexpr int BLOCK_SIZE = 256;
+    constexpr int BLOCK_SIZE = THREADS_PER_BLOCK;
     constexpr int BLOCK_WORK_SIZE = NRanks * BLOCK_SIZE * VEC_SIZE;
     int nblocks = (size + BLOCK_WORK_SIZE - 1) / BLOCK_WORK_SIZE;
     nblocks = std::min(nblocks, NBLOCKS_PER_GPU);
@@ -644,7 +651,7 @@ std::tuple<bool, float, float> runbench(int nranks, int size, bool validate, flo
 
 int main() {
     int nranks = test::comm_utils::enable_p2p();
-    std::cout << "nranks:" << nranks << "\n";
+    std::cout << "nranks:" << nranks << ", NBLOCKS_PER_GPU:" << NBLOCKS_PER_GPU << ", THREADS_PER_BLOCK:" << THREADS_PER_BLOCK << "\n";
     std::vector<int> warmup_sizes = {1024 * 1024, 1024 * 1024};
     for (auto size : warmup_sizes) {
         auto [val, dur, gbps] = test::runbench<float>(nranks, size, false, 1e-2);
