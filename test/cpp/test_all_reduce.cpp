@@ -389,7 +389,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_direct_kernel(int siz
 template <typename T, int NRanks, int BLOCK_SIZE>
 __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_inplace_kernel_2stage(int size, CommDeviceMeta<NRanks> meta, CommPtrs cptrs) {
     constexpr int VEC_SIZE = details::kBytesPerAccess / sizeof(T);
-    constexpr int BLOCK_WORK_SIZE = BLOCK_SIZE * VEC_SIZE;
     constexpr int WARP_SIZE_ = BLOCK_SIZE / NRanks;
     SyncComm<NRanks> comm(meta);
     __shared__ T shared[NRanks * WARP_SIZE_ * VEC_SIZE];
