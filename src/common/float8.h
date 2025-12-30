@@ -4,11 +4,14 @@
 
 namespace fp8_impl {
 
-__host__ inline int clz(uint32_t x) {
-    return __builtin_clz(x);
-}
-__device__ inline int clz(uint32_t x) {
+__host__ __device__ __forceinline__ int clz(uint32_t x) {
+#if defined(__CUDA_ARCH__)
     return __clz(x);
+#elif defined(__HIP_ARCH__)
+    return __clz(x);
+#else
+    return __builtin_clz(x);
+#endif
 }
 
 template <int we, int wm, bool negative_zero_nan, bool clip>

@@ -102,7 +102,7 @@ public:
                   gpuMemcpyHostToDevice);
         T *lamport_data_bufs_ = new T[3 * nranks * size];
         for (int i = 0; i < 3 * nranks * size; ++i) {
-            lamport_data_bufs_[i] = neg_zero_v<T>;
+            // lamport_data_bufs_[i] = neg_zero_v<T>;
         }
         gpuMemcpy(oneshot_comm_bufs, lamport_data_bufs_,
                   3 * nranks * size * sizeof(T), gpuMemcpyHostToDevice);
