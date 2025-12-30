@@ -64,20 +64,6 @@ struct alignas(sizeof(T) * vec_size) vec_t {
             ptr[i] = data[i];
         }
     }
-    __device__ __forceinline__ void nontemporal_load(const T *ptr) {
-        constexpr int ITERS = vec_size * sizeof(T) / sizeof(uint32_t);
-#pragma unroll
-        for (int i = 0; i < ITERS; ++i) {
-            reinterpret_cast<uint32_t *>(&data)[i] = __builtin_nontemporal_load((uint32_t *)ptr + i);
-        }
-    }
-    __device__ __forceinline__ void nontemporal_store(T *ptr) {
-        constexpr int ITERS = vec_size * sizeof(T) / sizeof(uint32_t);
-#pragma unroll
-        for (int i = 0; i < ITERS; ++i) {
-            __builtin_nontemporal_store(reinterpret_cast<uint32_t *>(&data)[i], (uint32_t *)ptr + i);
-        }
-    }
     __device__ __forceinline__ void fill(T val) {
 #pragma unroll
         for (int i = 0; i < vec_size; ++i) {
@@ -111,8 +97,6 @@ __device__ __forceinline__ void warp_rms_norm_(
         float v = (float)input[i];
         acc += v * v;
     }
-    int warp_id = threadIdx.x / WARP_SIZE;
-    int warp_t_id = threadIdx.x % WARP_SIZE;
     acc = block_utils::warp_reduce_sum<float>(acc);
     acc = block_utils::warp_shfl_sync<float>(acc, 0);
     auto s_val = rsqrtf(acc / rms_dim + rms_eps);
