@@ -46,6 +46,10 @@ TORCH_LIBRARY(gpuk, m) {
           "SymInt num_tokens, SymInt num_heads_q, SymInt num_heads_k, SymInt num_heads_v, SymInt head_size, "
           "bool is_neox_style, int[] mrope_section_, bool is_interleaved, float eps, "
           "Tensor q, Tensor k_cache, Tensor v_cache, Tensor kv_loc, float k_scale, float v_scale) -> ()");
+    m.def("fused_rope_rms_2way(Tensor q0, Tensor k0, Tensor q1, Tensor k1, "
+          "Tensor w_q0, Tensor w_k0, Tensor w_q1, Tensor w_k1, Tensor cos_sin0, Tensor cos_sin1, "
+          "SymInt batch_size, SymInt num_tokens0, SymInt num_tokens1, SymInt num_heads_q, SymInt num_heads_k, "
+          "SymInt head_size, bool is_interleaved, float eps, Tensor out_q01, Tensor out_k01) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
@@ -54,4 +58,5 @@ TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
     m.impl("fused_rope_rms", &fused_rope_rms);
     m.impl("fused_mrope_3d_rms", &fused_mrope_3d_rms);
     m.impl("fused_mrope_3d_rms_set_kv", &fused_mrope_3d_rms_set_kv);
+    m.impl("fused_rope_rms_2way", &fused_rope_rms_2way);
 }

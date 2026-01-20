@@ -167,3 +167,47 @@ void fused_mrope_3d_rms_set_kv(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_
             }
         });
 }
+
+void fused_rope_rms_2way(
+    Tensor &q0, Tensor &k0, Tensor &q1, Tensor &k1,
+    Tensor &w_q0, Tensor &w_k0, Tensor &w_q1, Tensor &w_k1,
+    Tensor &cos_sin0, Tensor &cos_sin1,
+    int64_t batch_size, int64_t num_tokens0, int64_t num_tokens1,
+    int64_t num_heads_q, int64_t num_heads_k,
+    int64_t head_size, bool is_interleaved, double eps,
+    Tensor &out_q01, Tensor &out_k01) {
+    TORCH_CHECK(q0.is_contiguous() && k0.is_contiguous() && q1.is_contiguous() && k1.is_contiguous());
+    TORCH_CHECK(w_q0.is_contiguous() && w_k0.is_contiguous() && w_q1.is_contiguous() && w_k1.is_contiguous());
+    TORCH_CHECK(cos_sin0.is_contiguous() && cos_sin1.is_contiguous());
+    const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(q0));
+    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        kBFloat16,
+        kHalf,
+        q0.scalar_type(),
+        "fused_rope_rms_2way", [&] {
+            using T = KernelElementType<scalar_t>::type;
+            rope_rms::fused_rope_rms_2way<T>(
+                (T *)q0.data_ptr<scalar_t>(),
+                (T *)k0.data_ptr<scalar_t>(),
+                (T *)q1.data_ptr<scalar_t>(),
+                (T *)k1.data_ptr<scalar_t>(),
+                (T *)w_q0.data_ptr<scalar_t>(),
+                (T *)w_k0.data_ptr<scalar_t>(),
+                (T *)w_q1.data_ptr<scalar_t>(),
+                (T *)w_k1.data_ptr<scalar_t>(),
+                (T *)cos_sin0.data_ptr<scalar_t>(),
+                (T *)cos_sin1.data_ptr<scalar_t>(),
+                batch_size,
+                num_tokens0,
+                num_tokens1,
+                num_heads_q,
+                num_heads_k,
+                head_size,
+                is_interleaved,
+                eps,
+                (T *)out_q01.data_ptr<scalar_t>(),
+                (T *)out_k01.data_ptr<scalar_t>(),
+                stream);
+        });
+}
