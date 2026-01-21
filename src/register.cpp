@@ -60,3 +60,7 @@ TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
     m.impl("fused_mrope_3d_rms_set_kv", &fused_mrope_3d_rms_set_kv);
     m.impl("fused_rope_rms_2way", &fused_rope_rms_2way);
 }
+
+TORCH_LIBRARY_IMPL(gpuk, Meta, m) {
+    m.impl("fused_rope_rms_2way", &fused_rope_rms_2way_meta);
+}
