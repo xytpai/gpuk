@@ -33,34 +33,32 @@ TORCH_LIBRARY(gpuk, m) {
     m.impl("open_ar_fusion_captured_handles", &open_ar_fusion_captured_handles);
 
     m.def("allreduce_inplace(SymInt fptr, Tensor input) -> ()");
+    m.impl("allreduce_inplace", torch::kCUDA, &allreduce_inplace);
     m.def("allreduce_rms(SymInt fptr, Tensor allreduce_in, "
           "Tensor residual_in, Tensor rms_gamma, Tensor residual_out, Tensor "
           "norm_out, Tensor scale_out, float eps, SymInt quant_type) -> ()");
+    m.impl("allreduce_rms", torch::kCUDA, &allreduce_rms);
+
     m.def("fused_rope_rms(Tensor qkv, Tensor qw, Tensor kw, Tensor cos_sin, Tensor positions, "
           "SymInt num_tokens, SymInt num_heads_q, SymInt num_heads_k, SymInt num_heads_v, SymInt head_size, "
           "bool is_neox_style, float eps) -> ()");
+    m.impl("fused_rope_rms", torch::kCUDA, &fused_rope_rms);
+
     m.def("fused_mrope_3d_rms(Tensor qkv, Tensor qw, Tensor kw, Tensor cos_sin, Tensor positions, "
           "SymInt num_tokens, SymInt num_heads_q, SymInt num_heads_k, SymInt num_heads_v, SymInt head_size, "
           "bool is_neox_style, int[] mrope_section_, bool is_interleaved, float eps) -> ()");
+    m.impl("fused_mrope_3d_rms", torch::kCUDA, &fused_mrope_3d_rms);
+
     m.def("fused_mrope_3d_rms_set_kv(Tensor qkv, Tensor qw, Tensor kw, Tensor cos_sin, Tensor positions, "
           "SymInt num_tokens, SymInt num_heads_q, SymInt num_heads_k, SymInt num_heads_v, SymInt head_size, "
           "bool is_neox_style, int[] mrope_section_, bool is_interleaved, float eps, "
           "Tensor q, Tensor k_cache, Tensor v_cache, Tensor kv_loc, float k_scale, float v_scale) -> ()");
+    m.impl("fused_mrope_3d_rms_set_kv", torch::kCUDA, &fused_mrope_3d_rms_set_kv);
+
     m.def("fused_rope_rms_2way(Tensor q0, Tensor k0, Tensor q1, Tensor k1, "
           "Tensor w_q0, Tensor w_k0, Tensor w_q1, Tensor w_k1, Tensor cos_sin0, Tensor cos_sin1, "
           "SymInt batch_size, SymInt num_tokens0, SymInt num_tokens1, SymInt num_heads_q, SymInt num_heads_k, "
-          "SymInt head_size, bool is_interleaved, float eps, Tensor out_q01, Tensor out_k01) -> ()");
-}
-
-TORCH_LIBRARY_IMPL(gpuk, CUDA, m) {
-    m.impl("allreduce_inplace", &allreduce_inplace);
-    m.impl("allreduce_rms", &allreduce_rms);
-    m.impl("fused_rope_rms", &fused_rope_rms);
-    m.impl("fused_mrope_3d_rms", &fused_mrope_3d_rms);
-    m.impl("fused_mrope_3d_rms_set_kv", &fused_mrope_3d_rms_set_kv);
-    m.impl("fused_rope_rms_2way", &fused_rope_rms_2way);
-}
-
-TORCH_LIBRARY_IMPL(gpuk, Meta, m) {
-    m.impl("fused_rope_rms_2way", &fused_rope_rms_2way_meta);
+          "SymInt head_size, bool is_interleaved, float eps) -> (Tensor out_q01, Tensor out_k01)");
+    m.impl("fused_rope_rms_2way", torch::kCUDA, &fused_rope_rms_2way);
+    m.impl("fused_rope_rms_2way", torch::kMeta, &fused_rope_rms_2way_meta);
 }

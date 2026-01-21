@@ -102,9 +102,7 @@ def run_fused_rope_rms_2way(
     is_interleaved: bool,
     eps: float,
 ):
-    q01 = torch.empty((batch_size, num_tokens0 + num_tokens1, num_heads_q, head_size), dtype=q0.dtype, device=q0.device)
-    k01 = torch.empty((batch_size, num_tokens0 + num_tokens1, num_heads_k, head_size), dtype=k0.dtype, device=k0.device)
-    gpuk.fused_rope_rms_2way(
+    q01, k01 = gpuk.fused_rope_rms_2way(
         q0,
         k0,
         q1,
@@ -123,8 +121,6 @@ def run_fused_rope_rms_2way(
         head_size,
         is_interleaved,
         eps,
-        q01,
-        k01,
     )
     return q01, k01
 

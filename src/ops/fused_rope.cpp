@@ -168,17 +168,33 @@ void fused_mrope_3d_rms_set_kv(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_
         });
 }
 
-void fused_rope_rms_2way(
+std::tuple<Tensor, Tensor> fused_rope_rms_2way_meta(
     Tensor &q0, Tensor &k0, Tensor &q1, Tensor &k1,
     Tensor &w_q0, Tensor &w_k0, Tensor &w_q1, Tensor &w_k1,
     Tensor &cos_sin0, Tensor &cos_sin1,
     int64_t batch_size, int64_t num_tokens0, int64_t num_tokens1,
     int64_t num_heads_q, int64_t num_heads_k,
-    int64_t head_size, bool is_interleaved, double eps,
-    Tensor &out_q01, Tensor &out_k01) {
+    int64_t head_size, bool is_interleaved, double eps) {
     TORCH_CHECK(q0.is_contiguous() && k0.is_contiguous() && q1.is_contiguous() && k1.is_contiguous());
     TORCH_CHECK(w_q0.is_contiguous() && w_k0.is_contiguous() && w_q1.is_contiguous() && w_k1.is_contiguous());
     TORCH_CHECK(cos_sin0.is_contiguous() && cos_sin1.is_contiguous());
+    Tensor out_q01 = empty({batch_size, num_tokens0 + num_tokens1, num_heads_q, head_size}, q0.options());
+    Tensor out_k01 = empty({batch_size, num_tokens0 + num_tokens1, num_heads_k, head_size}, k0.options());
+    return std::make_tuple(std::move(out_q01), std::move(out_k01));
+}
+
+std::tuple<Tensor, Tensor> fused_rope_rms_2way(
+    Tensor &q0, Tensor &k0, Tensor &q1, Tensor &k1,
+    Tensor &w_q0, Tensor &w_k0, Tensor &w_q1, Tensor &w_k1,
+    Tensor &cos_sin0, Tensor &cos_sin1,
+    int64_t batch_size, int64_t num_tokens0, int64_t num_tokens1,
+    int64_t num_heads_q, int64_t num_heads_k,
+    int64_t head_size, bool is_interleaved, double eps) {
+    auto meta = fused_rope_rms_2way_meta(q0, k0, q1, k1, w_q0, w_k0, w_q1, w_k1,
+                                         cos_sin0, cos_sin1, batch_size, num_tokens0, num_tokens1, num_heads_q, num_heads_k,
+                                         head_size, is_interleaved, eps);
+    auto out_q01 = std::get<0>(meta);
+    auto out_k01 = std::get<1>(meta);
     const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(q0));
     auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
     AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -210,14 +226,5 @@ void fused_rope_rms_2way(
                 (T *)out_k01.data_ptr<scalar_t>(),
                 stream);
         });
-}
-
-void fused_rope_rms_2way_meta(
-    Tensor &q0, Tensor &k0, Tensor &q1, Tensor &k1,
-    Tensor &w_q0, Tensor &w_k0, Tensor &w_q1, Tensor &w_k1,
-    Tensor &cos_sin0, Tensor &cos_sin1,
-    int64_t batch_size, int64_t num_tokens0, int64_t num_tokens1,
-    int64_t num_heads_q, int64_t num_heads_k,
-    int64_t head_size, bool is_interleaved, double eps,
-    Tensor &out_q01, Tensor &out_k01) {
+    return std::make_tuple(std::move(out_q01), std::move(out_k01));
 }
