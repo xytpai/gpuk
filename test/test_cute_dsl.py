@@ -748,43 +748,62 @@ class TensorOpGemm:
         return (new_i, new_j)
 
 
-if __name__ == "__main__":
-    B = 1
-    M = 1024
-    N = 1024
-    K = 512
-    dtype = torch.float16
-    dtype_cutlass = cutlass.Float16
-    a = torch.randn(B, M, K, dtype=dtype, device="cuda")
-    b = torch.randn(B, N, K, dtype=dtype, device="cuda")
-    c = torch.empty(B, M, N, dtype=dtype, device="cuda")
+def make_cute_tensor(torch_tensor: torch.Tensor):
+    # torch_tensor: [B, M, K] or [B, N, K] or [B, M, N]
 
-    def make_cute_tensor(torch_tensor):
-        cute_tensor = (
-            from_dlpack(torch_tensor.permute(1, 2, 0), assumed_align=16)
-            .mark_layout_dynamic(leading_dim=1)
+    dtype = torch_tensor.dtype
+    if dtype == torch.float16:
+        dtype_cutlass = cutlass.Float16
+    elif dtype == torch.bfloat16:
+        dtype_cutlass = cutlass.BFloat16
+    elif dtype == torch.float32:
+        dtype_cutlass = cutlass.Float32
+    else:
+        raise ValueError("Unsupported data type")
+    
+    is_mode0_major = not (torch_tensor.stride()[2] == 1)
+    
+    cute_tensor = (
+        from_dlpack(
+            torch_tensor.permute(1, 2, 0), assumed_align=16)
+            .mark_layout_dynamic(leading_dim=(1 if not is_mode0_major else 0))
             .mark_compact_shape_dynamic(
-                mode=1,
-                stride_order=(2, 0, 1),
+                mode=(1 if not is_mode0_major else 0),
+                stride_order=(2, 0, 1) if not is_mode0_major else (2, 1, 0),
                 divisibility=(128 // dtype_cutlass.width),
             )
         )
-        return cute_tensor
-    
-    mA = make_cute_tensor(a)
-    mB = make_cute_tensor(b)
-    mC = make_cute_tensor(c)
+    return cute_tensor, dtype_cutlass
 
+
+def cute_dsl_gemm(a: torch.Tensor, b: torch.Tensor, dtype: torch.dtype):
+    B, M, K = a.shape
+    N = b.shape[1]
+    c = torch.empty(B, M, N, dtype=dtype, device="cuda")
+    mA, cutlass_dtype_a = make_cute_tensor(a)
+    mB, cutlass_dtype_b = make_cute_tensor(b)
+    mC, cutlass_dtype_c = make_cute_tensor(c)
     tensor_op_gemm = TensorOpGemm(
-        cutlass.Float16,
-        cutlass.Float16,
+        cutlass_dtype_a,
+        cutlass_dtype_c,
         cutlass.Float32,
         (2, 2, 1),
     )
     compiled_gemm = cute.compile(tensor_op_gemm, mA, mB, mC)
     compiled_gemm(mA, mB, mC)
+    return c
 
-    refc = torch.bmm(a, b.permute(0, 2, 1))
 
-    print(refc)
-    print(c)
+def test_cute_dsl_gemm(B=1, M=1024, N=1024, K=512, ab_dtype=torch.bfloat16, c_dtype=torch.float):
+    a = torch.randn(B, M, K, dtype=ab_dtype, device="cuda")
+    b = torch.randn(B, N, K, dtype=ab_dtype, device="cuda")
+    cute_out = cute_dsl_gemm(a, b, c_dtype)
+    ref_out = torch.bmm(a, b.permute(0, 2, 1)).to(cute_out.dtype)
+    print(f"cute_out:{cute_out}")
+    print(f"ref_out:{ref_out}")
+    assert torch.allclose(cute_out, ref_out, atol=1e-2, rtol=1e-2)
+    return cute_out
+
+
+if __name__ == "__main__":
+    test_cute_dsl_gemm()
