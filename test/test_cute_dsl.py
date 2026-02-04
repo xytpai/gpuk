@@ -1,8 +1,11 @@
 import argparse
 import math
+from dataclasses import dataclass
 from typing import Tuple, Type
 
 import torch
+from torch._inductor import config
+import torch.profiler as profiler
 
 import cutlass
 import cutlass.cute as cute
@@ -797,13 +800,68 @@ def cute_dsl_gemm(a: torch.Tensor, b: torch.Tensor, dtype: torch.dtype):
 def test_cute_dsl_gemm(B=1, M=1024, N=1024, K=512, ab_dtype=torch.bfloat16, c_dtype=torch.float):
     a = torch.randn(B, M, K, dtype=ab_dtype, device="cuda")
     b = torch.randn(B, N, K, dtype=ab_dtype, device="cuda")
-    cute_out = cute_dsl_gemm(a, b, c_dtype)
-    ref_out = torch.bmm(a, b.permute(0, 2, 1)).to(cute_out.dtype)
-    print(f"cute_out:{cute_out}")
-    print(f"ref_out:{ref_out}")
+    with profiler.profile(
+            activities=[
+                profiler.ProfilerActivity.CUDA
+            ],
+        ) as prof:
+        cute_out = cute_dsl_gemm(a, b, c_dtype)
+        ref_out = torch.bmm(a, b.permute(0, 2, 1)).to(cute_out.dtype)
+    print(prof.key_averages().table(sort_by="cuda_time_total"))
     assert torch.allclose(cute_out, ref_out, atol=1e-2, rtol=1e-2)
+    # print(f"cute_out:{cute_out}")
+    # print(f"ref_out:{ref_out}")
     return cute_out
 
 
+@torch.compile
+def compiled_bmm(a, b, c_dtype):
+    output = torch.bmm(a, b.permute(0, 2, 1)).to(c_dtype)
+    return output
+
+
+def test_cute_dsl_gemm_autotune(B=1, M=1024, N=1024, K=512, ab_dtype=torch.bfloat16, c_dtype=torch.float):
+    a = torch.randn(B, M, K, dtype=ab_dtype, device="cuda")
+    b = torch.randn(B, N, K, dtype=ab_dtype, device="cuda")
+    with profiler.profile(
+            activities=[
+                profiler.ProfilerActivity.CUDA
+            ],
+        ) as prof:
+        output = compiled_bmm(a, b, c_dtype)
+    print(prof.key_averages().table(sort_by="cuda_time_total"))
+    # print(f"ref_out:{output}")
+    return output
+
+
+@dataclass
+class TestArgs:
+    B: int
+    M: int
+    N: int
+    K: int
+    ab_dtype: str
+    c_dtype: str
+
+
 if __name__ == "__main__":
-    test_cute_dsl_gemm()
+    args = [
+        TestArgs(B=1, M=1024, N=1024, K=512, ab_dtype='torch.bfloat16', c_dtype='torch.float'),
+        TestArgs(B=1, M=1024, N=1024, K=512, ab_dtype='torch.bfloat16', c_dtype='torch.float'),
+    ]
+
+    print("Testing CUTE DSL GEMM...")
+    for arg in args:
+        print(arg)
+        test_cute_dsl_gemm(B=arg.B, M=arg.M, N=arg.N, K=arg.K, 
+            ab_dtype=eval(arg.ab_dtype), c_dtype=eval(arg.c_dtype))
+
+    print("Testing CUTE DSL GEMM with TorchDynamo autotune...")
+    config.max_autotune = True
+    config.max_autotune_gemm = True
+    config.max_autotune_gemm_backends = "TRITON"
+    config.debug = True
+    for arg in args:
+        print(arg)
+        test_cute_dsl_gemm_autotune(B=arg.B, M=arg.M, N=arg.N, K=arg.K, 
+            ab_dtype=eval(arg.ab_dtype), c_dtype=eval(arg.c_dtype))

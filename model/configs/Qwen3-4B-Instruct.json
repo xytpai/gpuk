@@ -1,0 +1,22 @@
+{
+  "dim": 2560,
+  "head_dim": 128,
+  "n_layers": 36,
+  "n_heads": 32,
+  "n_kv_heads": 8,
+  "vocab_size": 151936,
+  "norm_eps": 1e-06,
+  "rope_theta": 5000000.0,
+  "dtype": "torch.bfloat16",
+  "explicit_ffn_dim": 9728,
+  "use_qk_norm": true,
+  "rope_interval_split": false,
+
+  "base_dir": "/data/models/Qwen3-4B-Instruct-2507",
+  "wfiles": [
+    "model-00001-of-00003.safetensors",
+    "model-00002-of-00003.safetensors",
+    "model-00003-of-00003.safetensors"
+  ],
+  "tfile": "tokenizer.json"
+}
