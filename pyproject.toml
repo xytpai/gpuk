@@ -1,0 +1,9 @@
+[build-system]
+requires = [
+    "pybind11>=3.0.1",
+    "setuptools",
+    "wheel",
+    "packaging",
+    "ninja",
+    "torch"
+]

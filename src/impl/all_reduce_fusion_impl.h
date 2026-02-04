@@ -5,7 +5,7 @@
 using namespace std;
 using namespace kernel_utils;
 using namespace comm_utils;
-namespace cg = cooperative_groups;
+// namespace cg = cooperative_groups;
 
 #define WARP_SIZE 32
 #define CHECK_FAIL assert

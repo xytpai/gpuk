@@ -9,7 +9,11 @@ template <typename T, int WARP_SIZE, typename func_t>
 __device__ __forceinline__ T warp_reduce(T val, func_t fn) {
 #pragma unroll
     for (int offset = (WARP_SIZE >> 1); offset > 0; offset >>= 1) {
+#ifdef __CUDACC__
+        val = fn(val, __shfl_xor_sync(0xffffffff, val, offset, WARP_SIZE));
+#else
         val = fn(val, __shfl_xor(val, offset, WARP_SIZE));
+#endif
     }
     return val;
 }
@@ -90,24 +94,24 @@ __device__ __forceinline__ void vec_add_r_(vec_t<T, VEC_SIZE> (&self)[NRanks]) {
     }
 }
 
-template <typename T, uint32_t VEC_SIZE>
-__device__ __forceinline__ bool has_neg_zero(const vec_t<T, VEC_SIZE> &vec) {
-#pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-        if (is_negative_zero<T>(vec[i])) {
-            return true;
-        }
-    }
-    return false;
-}
+// template <typename T, uint32_t VEC_SIZE>
+// __device__ __forceinline__ bool has_neg_zero(const vec_t<T, VEC_SIZE> &vec) {
+// #pragma unroll
+//     for (int i = 0; i < VEC_SIZE; ++i) {
+//         if (is_negative_zero<T>(vec[i])) {
+//             return true;
+//         }
+//     }
+//     return false;
+// }
 
-template <typename T, uint32_t VEC_SIZE>
-__device__ __forceinline__ void remove_neg_zero(vec_t<T, VEC_SIZE> &vec) {
-#pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-        vec[i] = (is_negative_zero<T>(vec[i])) ? static_cast<T>(0.f) : vec[i];
-    }
-}
+// template <typename T, uint32_t VEC_SIZE>
+// __device__ __forceinline__ void remove_neg_zero(vec_t<T, VEC_SIZE> &vec) {
+// #pragma unroll
+//     for (int i = 0; i < VEC_SIZE; ++i) {
+//         vec[i] = (is_negative_zero<T>(vec[i])) ? static_cast<T>(0.f) : vec[i];
+//     }
+// }
 
 template <typename scalar_t, int vec_size>
 struct alignas(sizeof(scalar_t) * vec_size) aligned_array {

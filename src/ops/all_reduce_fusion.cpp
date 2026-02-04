@@ -337,20 +337,11 @@ struct KernelElementType<c10::BFloat16> {
     using type = __bfloat16;
 };
 
-#ifdef __CUDACC__
-#else
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
-#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
-#endif
-
 void allreduce_inplace(fptr_t fptr, Tensor &input) {
     TORCH_CHECK(input.is_contiguous());
     auto dev = input.device();
     c10::DeviceGuard dev_guard(dev);
-#ifdef __CUDACC__
-#else
-    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
-#endif
+    auto stream = GET_CURRENT_STREAM;
     int size = input.numel();
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);
     auto comm_data = ptr->get_comm_data(input, stream, false);
@@ -376,10 +367,7 @@ void allreduce_rms(fptr_t fptr, Tensor &allreduce_in, Tensor &residual_in,
     TORCH_CHECK(residual_out.is_contiguous() && norm_out.is_contiguous() && scale_out.is_contiguous());
     auto dev = allreduce_in.device();
     c10::DeviceGuard dev_guard(dev);
-#ifdef __CUDACC__
-#else
-    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
-#endif
+    auto stream = GET_CURRENT_STREAM;
     int size = allreduce_in.numel();
     int hidden_dim = allreduce_in.size(-1);
     auto ptr = reinterpret_cast<CommWorkspace *>(fptr);

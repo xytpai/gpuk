@@ -1,9 +1,6 @@
 #include "ops.h"
 #include "rope_rms_impl.h"
 
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
-#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
-
 template <typename T>
 struct KernelElementType {
     using type = T;
@@ -16,15 +13,15 @@ struct KernelElementType<c10::Half> {
 
 template <>
 struct KernelElementType<c10::BFloat16> {
-    using type = hip_bfloat16;
+    using type = __bfloat16;
 };
 
 void fused_rope_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Tensor &positions,
                     int64_t num_tokens, int64_t num_heads_q, int64_t num_heads_k, int64_t num_heads_v, int64_t head_size,
                     bool is_neox_style, double eps) {
     TORCH_CHECK(qkv.is_contiguous() && qw.is_contiguous() && kw.is_contiguous() && cos_sin.is_contiguous());
-    const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(qkv));
-    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+    c10::DeviceGuard device_guard(qkv.device());
+    auto stream = GET_CURRENT_STREAM;
     auto pos_strides = positions.strides();
     TORCH_CHECK(pos_strides.size() == 1);
     AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -60,8 +57,8 @@ void fused_mrope_3d_rms(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_sin, Te
     mrope_section[0] = mrope_section_[0];
     mrope_section[1] = mrope_section_[1];
     mrope_section[2] = mrope_section_[2];
-    const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(qkv));
-    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+    c10::DeviceGuard device_guard(qkv.device());
+    auto stream = GET_CURRENT_STREAM;
     auto pos_strides = positions.strides();
     TORCH_CHECK(pos_strides.size() == 2);
     AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -102,8 +99,8 @@ void fused_mrope_3d_rms_set_kv(Tensor &qkv, Tensor &qw, Tensor &kw, Tensor &cos_
     mrope_section[0] = mrope_section_[0];
     mrope_section[1] = mrope_section_[1];
     mrope_section[2] = mrope_section_[2];
-    const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(qkv));
-    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+    c10::DeviceGuard device_guard(qkv.device());
+    auto stream = GET_CURRENT_STREAM;
     auto pos_strides = positions.strides();
     auto kv_cache_dtype = k_cache.scalar_type();
     auto qkv_dtype = qkv.scalar_type();
@@ -195,8 +192,8 @@ std::tuple<Tensor, Tensor> fused_rope_rms_2way(
                                          head_size, is_interleaved, eps);
     auto out_q01 = std::get<0>(meta);
     auto out_k01 = std::get<1>(meta);
-    const at::hip::OptionalHIPGuardMasqueradingAsCUDA device_guard(device_of(q0));
-    auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+    c10::DeviceGuard device_guard(q0.device());
+    auto stream = GET_CURRENT_STREAM;
     AT_DISPATCH_FLOATING_TYPES_AND2(
         kBFloat16,
         kHalf,

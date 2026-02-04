@@ -19,7 +19,7 @@
 #if defined(__HIPCC__)
 
 #include <hip/hip_bf16.h>
-#include <hip/hip_cooperative_groups.h>
+// #include <hip/hip_cooperative_groups.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
@@ -59,7 +59,7 @@
 #define gpuDevAttrMaxRegistersPerBlock hipDeviceAttributeMaxRegistersPerBlock
 #define gpuDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 
-#define gpuLaunchCooperativeKernel hipLaunchCooperativeKernel
+// #define gpuLaunchCooperativeKernel hipLaunchCooperativeKernel
 
 #define __bfloat16 __hip_bfloat16
 #define __bfloat16_raw __hip_bfloat16_raw
@@ -79,7 +79,7 @@
 
 #if defined(__CUDACC__)
 
-#include <cooperative_groups.h>
+// #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -120,7 +120,7 @@
 #define gpuDevAttrMaxRegistersPerBlock cudaDevAttrMaxRegistersPerBlock
 #define gpuDevAttrMultiProcessorCount cudaDevAttrMultiProcessorCount
 
-#define gpuLaunchCooperativeKernel cudaLaunchCooperativeKernel
+// #define gpuLaunchCooperativeKernel cudaLaunchCooperativeKernel
 
 #define __bfloat16 __nv_bfloat16
 #define __bfloat16_raw __nv_bfloat16_raw
@@ -129,9 +129,9 @@
 #define gpuIpcGetMemHandle cudaIpcGetMemHandle
 #define gpuIpcOpenMemHandle cudaIpcOpenMemHandle
 #define gpuIpcMemLazyEnablePeerAccess cudaIpcMemLazyEnablePeerAccess
-#define gpuPointerGetAttribute cudaPointerGetAttribute
+#define gpuPointerGetAttribute cuPointerGetAttribute
 #define GPU_POINTER_ATTRIBUTE_RANGE_START_ADDR CU_POINTER_ATTRIBUTE_RANGE_START_ADDR
-#define gpuDeviceptr_t cudaDeviceptr_t
+#define gpuDeviceptr_t CUdeviceptr
 #define gpuStreamCaptureStatus cudaStreamCaptureStatus
 #define gpuStreamIsCapturing cudaStreamIsCapturing
 #define gpuStreamCaptureStatusActive cudaStreamCaptureStatusActive
