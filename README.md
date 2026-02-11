@@ -3,7 +3,7 @@
 ```bash
 git clone https://github.com/xytpai/gpuk
 cd gpuk
-python setup.py develop
+python -m pip install -e . --no-build-isolation
 ```
 
 ### Test
