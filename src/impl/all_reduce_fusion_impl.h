@@ -340,7 +340,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_2stage(
         val.load(reinterpret_cast<T *>(cptrs->data_ptrs[0]) + idx);
         vec_t<T, VEC_SIZE> res;
         res.load(reinterpret_cast<T *>(params.residual_in) + idx);
-        vec_add_<T, VEC_SIZE>(val, res);
+        val.add_(res);
         epilogue<T, VEC_SIZE, true, BLOCK_SIZE, QUANT_TYPE>(params, val, gamma, idx, tidx);
     }
 }

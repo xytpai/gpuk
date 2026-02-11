@@ -13,7 +13,7 @@ template <bool RELAXED = true>
 __device__ __forceinline__ void st_flag(int *addr, int flag) {
 #ifdef __CUDACC__
     asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(addr));
-#else
+#elif defined(__HIPCC__)
     __scoped_atomic_store_n(addr, flag,
                             RELAXED ? __ATOMIC_RELAXED : __ATOMIC_RELEASE,
                             __MEMORY_SCOPE_SYSTEM);
@@ -27,7 +27,7 @@ __device__ __forceinline__ int ld_flag(int *addr) {
     asm volatile("ld.global.acquire.sys.b32 %0, [%1];"
                  : "=r"(flag)
                  : "l"(addr));
-#else
+#elif defined(__HIPCC__)
     flag = __scoped_atomic_load_n(addr,
                                   RELAXED ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
                                   __MEMORY_SCOPE_SYSTEM);
