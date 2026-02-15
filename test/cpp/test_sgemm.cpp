@@ -113,7 +113,7 @@ public:
         gpuDeviceSynchronize();
     }
 
-    std::tuple<float, float> operator()() {
+    std::tuple<float, float, float> operator()() {
         gpuEvent_t start, stop;
         gpuEventCreate(&start);
         gpuEventCreate(&stop);
@@ -128,7 +128,7 @@ public:
         float output_bytes = (m * n) * sizeof(T);
         float gbps = (input_bytes + output_bytes) / 1000.0 / 1000.0 / ms;
         float tflops = ((float)2 * m * n * k) / (ms / 1000) * 1e-12;
-        return {gbps, tflops};
+        return {ms, gbps, tflops};
     }
 
     bool is_error(T out, T ref, float atol) {
@@ -152,7 +152,7 @@ public:
 };
 
 template <typename T>
-std::tuple<bool, float, float> runbench(
+std::tuple<bool, float, float, float> runbench(
     int64_t m,
     int64_t n,
     int64_t k,
@@ -166,9 +166,9 @@ std::tuple<bool, float, float> runbench(
     cpu_inputs.reset();
     gpu_inputs.reset(cpu_inputs);
     cpu_inputs();
-    auto gbps_tflops = gpu_inputs();
+    auto r = gpu_inputs();
     bool val = gpu_inputs.validate(cpu_inputs, atol);
-    return {val, std::get<0>(gbps_tflops), std::get<1>(gbps_tflops)};
+    return {val, std::get<0>(r), std::get<1>(r), std::get<2>(r)};
 }
 
 } // namespace test
@@ -184,7 +184,7 @@ int main() {
         auto n = ns[i];
         auto k = ks[i];
         std::cout << "m:" << m << ", n:" << n << ", k:" << k << ", alpha:" << alpha << ", beta:" << beta;
-        auto [val, gbps, tflops] = test::runbench<float>(m, n, k, alpha, beta);
-        std::cout << ", val:" << val << ", gbps:" << gbps << ", tflops:" << tflops << "\n";
+        auto [val, ms, gbps, tflops] = test::runbench<float>(m, n, k, alpha, beta);
+        std::cout << ", val:" << val << ", ms:" << ms << ", gbps:" << gbps << ", tflops:" << tflops << "\n";
     }
 }
