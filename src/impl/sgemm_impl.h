@@ -114,7 +114,8 @@ template <
     int WARP_N_THREADS,
     int VEC_M,
     int VEC_N,
-    bool DOUBLE_BUFFER>
+    bool DOUBLE_BUFFER,
+    int BLOCK_THREADS = 256>
 __global__ void sgemm_kernel(
     scalar_t *out,
     const scalar_t *a,
@@ -122,7 +123,7 @@ __global__ void sgemm_kernel(
     const int m, const int n, const int k,
     const scalar_t alpha,
     const scalar_t beta) {
-    static_assert(BLOCK_M_WARPS * BLOCK_N_WARPS == 8);
+    static_assert(BLOCK_M_WARPS * BLOCK_N_WARPS == BLOCK_THREADS / 32);
     static_assert(WARP_M_THREADS * WARP_N_THREADS == 32);
     constexpr int WARP_M = WARP_M_STEPS * WARP_M_THREADS * VEC_M;
     constexpr int WARP_N = WARP_N_STEPS * WARP_N_THREADS * VEC_N;
@@ -158,8 +159,8 @@ __global__ void sgemm_kernel(
     constexpr int LDG_B_X_THREADS = BLOCK_N / LDG_VEC_SIZE;
     int ldg_a_vec_idx = tid % LDG_A_X_THREADS;
     int ldg_b_vec_idx = tid % LDG_B_X_THREADS;
-    constexpr int LDG_REG_A_COUNT = BLOCK_KM_SIZE / LDG_VEC_SIZE / 256;
-    constexpr int LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / 256;
+    constexpr int LDG_REG_A_COUNT = BLOCK_KM_SIZE / LDG_VEC_SIZE / BLOCK_THREADS;
+    constexpr int LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / BLOCK_THREADS;
     static_assert(LDG_REG_A_COUNT >= 1 && LDG_REG_B_COUNT >= 1);
 
     int write_stage_idx = 0;
@@ -176,17 +177,17 @@ __global__ void sgemm_kernel(
 #pragma unroll
             for (int i = 0; i < LDG_REG_A_COUNT; i++)
                 ldg_a_reg[i] = reinterpret_cast<ldg_vec_t *>(const_cast<scalar_t *>(a) + a_begin
-                                                             + ((256 * i + tid) / LDG_A_X_THREADS) * k)[ldg_a_vec_idx];
+                                                             + ((BLOCK_THREADS * i + tid) / LDG_A_X_THREADS) * k)[ldg_a_vec_idx];
 #pragma unroll
             for (int i = 0; i < LDG_REG_B_COUNT; i++)
                 ldg_b_reg[i] = reinterpret_cast<ldg_vec_t *>(const_cast<scalar_t *>(b) + b_begin
-                                                             + ((256 * i + tid) / LDG_B_X_THREADS) * n)[ldg_b_vec_idx];
+                                                             + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * n)[ldg_b_vec_idx];
 
             // transpose to shared local memory
             auto bs_vec = reinterpret_cast<ldg_vec_t *>(bs + write_stage_idx * BLOCK_KN_SIZE);
 #pragma unroll
             for (int i = 0; i < LDG_REG_A_COUNT; i++) {
-                int y = (256 * i + tid) / LDG_A_X_THREADS;
+                int y = (BLOCK_THREADS * i + tid) / LDG_A_X_THREADS;
 #pragma unroll
                 for (int j = 0; j < LDG_VEC_SIZE; j++) {
                     as[write_stage_idx * BLOCK_KM_SIZE + (ldg_a_vec_idx * LDG_VEC_SIZE + j) * BLOCK_M + y] = ldg_a_reg[i].val[j];
@@ -194,7 +195,7 @@ __global__ void sgemm_kernel(
             }
 #pragma unroll
             for (int i = 0; i < LDG_REG_B_COUNT; i++) {
-                bs_vec[256 * i + tid] = ldg_b_reg[i];
+                bs_vec[BLOCK_THREADS * i + tid] = ldg_b_reg[i];
             }
             if constexpr (DOUBLE_BUFFER) {
                 read_stage_idx ^= 1;
