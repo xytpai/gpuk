@@ -54,50 +54,48 @@ struct mma_reg_t {
 };
 
 // If use 8 warps per block, we can specify BLOCK_M_WARPS=2, BLOCK_N_WARPS=4.
-// Each warp process (WARP_M_LANES * WARP_M_THREADS * VEC_M) * (WARP_N_LANES * WARP_N_THREADS * VEC_N) elements.
+// Each warp process (WARP_M_STEPS * WARP_M_THREADS * VEC_M) * (WARP_N_STEPS * WARP_N_THREADS * VEC_N) elements.
 // A & B are usually in shared memory. The layout for A is (BLOCK_K * BLOCK_M), for B is (BLOCK_K * BLOCK_N)
 template <
     typename scalar_t,
     int BLOCK_K,
     int BLOCK_M_WARPS,
     int BLOCK_N_WARPS,
-    int WARP_M_LANES,
-    int WARP_N_LANES,
+    int WARP_M_STEPS,
+    int WARP_N_STEPS,
     int WARP_M_THREADS,
     int WARP_N_THREADS,
     int VEC_M,
     int VEC_N>
 __device__ __forceinline__ void block_mma(scalar_t (*o)[VEC_M * VEC_N], scalar_t *a, scalar_t *b, int wid, int w_tid) {
-    constexpr int LANE_M = WARP_M_THREADS * VEC_M;
-    constexpr int LANE_N = WARP_N_THREADS * VEC_N;
-    constexpr int WARP_M = WARP_M_LANES * LANE_M;
-    constexpr int WARP_N = WARP_N_LANES * LANE_N;
+    constexpr int WARP_ATOM_M = WARP_M_THREADS * VEC_M;
+    constexpr int WARP_ATOM_N = WARP_N_THREADS * VEC_N;
+    constexpr int WARP_M = WARP_M_STEPS * WARP_ATOM_M;
+    constexpr int WARP_N = WARP_N_STEPS * WARP_ATOM_N;
     constexpr int BLOCK_M = BLOCK_M_WARPS * WARP_M;
     constexpr int BLOCK_N = BLOCK_N_WARPS * WARP_N;
     using a_vec_t = aligned_array<scalar_t, VEC_M>;
     using b_vec_t = aligned_array<scalar_t, VEC_N>;
-
-    int warp_offset_y = wid / BLOCK_N_WARPS * WARP_M;
-    int warp_offset_x = wid % BLOCK_N_WARPS * WARP_N;
-
+    int warp_y = wid / BLOCK_N_WARPS * WARP_M;
+    int warp_x = wid % BLOCK_N_WARPS * WARP_N;
 #pragma unroll
     for (int k = 0; k < BLOCK_K; ++k) {
 #pragma unroll
-        for (int lm = 0; lm < WARP_M_LANES; ++lm) {
+        for (int lm = 0; lm < WARP_M_STEPS; ++lm) {
+            int warp_atom_y = warp_y + lm * WARP_ATOM_M;
+            int thread_y = warp_atom_y + w_tid / WARP_N_THREADS * VEC_M;
 #pragma unroll
-            for (int ln = 0; ln < WARP_N_LANES; ++ln) {
-                int lane_offset_y = warp_offset_y + lm * LANE_M;
-                int lane_offset_x = warp_offset_x + ln * LANE_N;
-                int th_offset_y = lane_offset_y + w_tid / WARP_N_THREADS * VEC_M;
-                int th_offset_x = lane_offset_x + w_tid % WARP_N_THREADS * VEC_N;
+            for (int ln = 0; ln < WARP_N_STEPS; ++ln) {
+                int warp_atom_x = warp_x + ln * WARP_ATOM_N;
+                int thread_x = warp_atom_x + w_tid % WARP_N_THREADS * VEC_N;
                 mma_reg_t<scalar_t, VEC_M, VEC_N> reg;
-                reg.a_vec = *reinterpret_cast<a_vec_t *>(a + k * BLOCK_M + th_offset_y);
-                reg.b_vec = *reinterpret_cast<b_vec_t *>(b + k * BLOCK_N + th_offset_x);
+                reg.a_vec = *reinterpret_cast<a_vec_t *>(a + k * BLOCK_M + thread_y);
+                reg.b_vec = *reinterpret_cast<b_vec_t *>(b + k * BLOCK_N + thread_x);
 #pragma unroll
                 for (int i = 0; i < VEC_M; i++) {
 #pragma unroll
                     for (int j = 0; j < VEC_N; j++) {
-                        o[lm * WARP_N_LANES + ln][i * VEC_N + j] += reg.a[i] * reg.b[j];
+                        o[lm * WARP_N_STEPS + ln][i * VEC_N + j] += reg.a[i] * reg.b[j];
                     }
                 }
             }
@@ -110,14 +108,14 @@ template <
     int BLOCK_K,
     int BLOCK_M_WARPS,
     int BLOCK_N_WARPS,
-    int WARP_M_LANES,
-    int WARP_N_LANES,
+    int WARP_M_STEPS,
+    int WARP_N_STEPS,
     int WARP_M_THREADS,
     int WARP_N_THREADS,
     int VEC_M,
     int VEC_N,
     bool DOUBLE_BUFFER>
-__global__ __launch_bounds__(256) void sgemm_kernel(
+__global__ void sgemm_kernel(
     scalar_t *out,
     const scalar_t *a,
     const scalar_t *b,
@@ -126,8 +124,8 @@ __global__ __launch_bounds__(256) void sgemm_kernel(
     const scalar_t beta) {
     static_assert(BLOCK_M_WARPS * BLOCK_N_WARPS == 8);
     static_assert(WARP_M_THREADS * WARP_N_THREADS == 32);
-    constexpr int WARP_M = WARP_M_LANES * WARP_M_THREADS * VEC_M;
-    constexpr int WARP_N = WARP_N_LANES * WARP_N_THREADS * VEC_N;
+    constexpr int WARP_M = WARP_M_STEPS * WARP_M_THREADS * VEC_M;
+    constexpr int WARP_N = WARP_N_STEPS * WARP_N_THREADS * VEC_N;
     constexpr int BLOCK_M = BLOCK_M_WARPS * WARP_M;
     constexpr int BLOCK_N = BLOCK_N_WARPS * WARP_N;
 
@@ -152,7 +150,7 @@ __global__ __launch_bounds__(256) void sgemm_kernel(
     }
 
     // init o_reg
-    scalar_t o_reg[WARP_M_LANES * WARP_N_LANES][VEC_M * VEC_N] = {{(scalar_t)0}};
+    scalar_t o_reg[WARP_M_STEPS * WARP_N_STEPS][VEC_M * VEC_N] = {{(scalar_t)0}};
 
     constexpr int LDG_VEC_SIZE = 16 / sizeof(scalar_t);
     using ldg_vec_t = aligned_array<scalar_t, LDG_VEC_SIZE>;
@@ -207,7 +205,7 @@ __global__ __launch_bounds__(256) void sgemm_kernel(
 
         {
             block_mma<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
-                      WARP_M_LANES, WARP_N_LANES, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N>(
+                      WARP_M_STEPS, WARP_N_STEPS, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N>(
                 o_reg, as + read_stage_idx * BLOCK_KM_SIZE, bs + read_stage_idx * BLOCK_KN_SIZE,
                 wid, w_tid);
         }
@@ -219,26 +217,26 @@ __global__ __launch_bounds__(256) void sgemm_kernel(
 
     { // write back
         using stg_vec_t = aligned_array<scalar_t, VEC_N>;
-        int out_warp_offset_y = block_y * BLOCK_M + wid / BLOCK_N_WARPS * WARP_M;
-        int out_warp_offset_x = block_x * BLOCK_N + wid % BLOCK_N_WARPS * WARP_N;
-        constexpr int WARP_LANE_STEP_M = WARP_M / WARP_M_LANES;
-        constexpr int WARP_LANE_STEP_N = WARP_N / WARP_N_LANES;
+        int out_warp_y = block_y * BLOCK_M + wid / BLOCK_N_WARPS * WARP_M;
+        int out_warp_x = block_x * BLOCK_N + wid % BLOCK_N_WARPS * WARP_N;
+        constexpr int WARP_ATOM_M = WARP_M / WARP_M_STEPS;
+        constexpr int WARP_ATOM_N = WARP_N / WARP_N_STEPS;
 #pragma unroll
-        for (int lm = 0; lm < WARP_M_LANES; lm++) {
+        for (int lm = 0; lm < WARP_M_STEPS; lm++) {
 #pragma unroll
-            for (int ln = 0; ln < WARP_N_LANES; ln++) {
-                int out_th_offset_y = out_warp_offset_y + lm * WARP_LANE_STEP_M + w_tid / WARP_N_THREADS * VEC_M;
-                int out_th_offset_x = out_warp_offset_x + ln * WARP_LANE_STEP_N + w_tid % WARP_N_THREADS * VEC_N;
+            for (int ln = 0; ln < WARP_N_STEPS; ln++) {
+                int out_thread_y = out_warp_y + lm * WARP_ATOM_M + w_tid / WARP_N_THREADS * VEC_M;
+                int out_thread_x = out_warp_x + ln * WARP_ATOM_N + w_tid % WARP_N_THREADS * VEC_N;
 #pragma unroll
                 for (int i = 0; i < VEC_M; i++) {
-                    int y = out_th_offset_y + i;
-                    if (y < m && out_th_offset_x < n) {
-                        auto vec = *reinterpret_cast<stg_vec_t *>(out + y * n + out_th_offset_x);
+                    int y = out_thread_y + i;
+                    if (y < m && out_thread_x < n) {
+                        auto vec = *reinterpret_cast<stg_vec_t *>(out + y * n + out_thread_x);
 #pragma unroll
                         for (int j = 0; j < VEC_N; j++) {
-                            vec.val[j] = alpha * o_reg[lm * WARP_N_LANES + ln][i * VEC_N + j] + beta * vec.val[j];
+                            vec.val[j] = alpha * o_reg[lm * WARP_N_STEPS + ln][i * VEC_N + j] + beta * vec.val[j];
                         }
-                        *reinterpret_cast<stg_vec_t *>(out + y * n + out_th_offset_x) = vec;
+                        *reinterpret_cast<stg_vec_t *>(out + y * n + out_thread_x) = vec;
                     }
                 }
             }
@@ -267,26 +265,26 @@ void sgemm_(
     if constexpr (BLOCK_M == 64 && BLOCK_N == 64) {
         constexpr int BLOCK_K = 32;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_LANES*/ 1, /*WARP_N_LANES*/ 1,
+                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 1, /*WARP_N_STEPS*/ 1,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
                      DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
     }
     if constexpr (BLOCK_M == 128 && BLOCK_N == 64) {
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_LANES*/ 2, /*WARP_N_LANES*/ 2,
+                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 2,
                      DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_LANES*/ 2, /*WARP_N_LANES*/ 2,
+                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
                      DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 256 && BLOCK_N == 128) {
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_LANES*/ 4, /*WARP_N_LANES*/ 2,
+                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 4, /*WARP_N_STEPS*/ 2,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
                      DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
     }
@@ -306,7 +304,7 @@ void sgemm(
         sgemm_<scalar_t, 64, 64, true>(out, a, b, m, n, k, alpha, beta, stream);
     } else if (min_size <= 1024) {
         sgemm_<scalar_t, 128, 64, true>(out, a, b, m, n, k, alpha, beta, stream);
-    } else if (min_size <= 4096) {
+    } else if (min_size <= 8192) {
         sgemm_<scalar_t, 128, 128, true>(out, a, b, m, n, k, alpha, beta, stream);
     } else {
         sgemm_<scalar_t, 256, 128, true>(out, a, b, m, n, k, alpha, beta, stream);
