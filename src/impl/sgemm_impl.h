@@ -122,9 +122,7 @@ struct BlockTile {
         ldg_b_vec_idx(tid % LDG_B_X_THREADS) {
     }
 
-    __device__ __forceinline__ void ldg(
-        ldg_vec_t (&ldg_a_reg)[LDG_REG_A_COUNT], ldg_vec_t (&ldg_b_reg)[LDG_REG_B_COUNT],
-        const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
+    __device__ __forceinline__ void ldg(const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
 #pragma unroll
         for (int i = 0; i < LDG_REG_A_COUNT; i++)
             ldg_a_reg[i] = reinterpret_cast<ldg_vec_t *>(
@@ -135,8 +133,7 @@ struct BlockTile {
                 const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx];
     }
 
-    __device__ __forceinline__ void sts(scalar_t *as, scalar_t *bs,
-                                        ldg_vec_t (&ldg_a_reg)[LDG_REG_A_COUNT], ldg_vec_t (&ldg_b_reg)[LDG_REG_B_COUNT]) {
+    __device__ __forceinline__ void sts(scalar_t *as, scalar_t *bs) {
         auto bs_vec = reinterpret_cast<ldg_vec_t *>(bs);
 #pragma unroll
         for (int i = 0; i < LDG_REG_A_COUNT; i++) {
@@ -174,6 +171,8 @@ private:
     int w_tid;
     int ldg_a_vec_idx;
     int ldg_b_vec_idx;
+    ldg_vec_t ldg_a_reg[LDG_REG_A_COUNT];
+    ldg_vec_t ldg_b_reg[LDG_REG_B_COUNT];
 };
 
 template <
@@ -186,8 +185,7 @@ template <
     int WARP_M_THREADS,
     int WARP_N_THREADS,
     int VEC_M,
-    int VEC_N,
-    bool DOUBLE_BUFFER>
+    int VEC_N>
 __global__ void sgemm_kernel(
     scalar_t *out,
     const scalar_t *a,
@@ -208,61 +206,41 @@ __global__ void sgemm_kernel(
     int block_x = blockIdx.z * gridDim.x + blockIdx.x;
 
     // get slm
-    constexpr int SLM_SIZE = DOUBLE_BUFFER ? BLOCK_K * (BLOCK_M + BLOCK_N) * 2 : BLOCK_K * (BLOCK_M + BLOCK_N);
-    __shared__ scalar_t slm[SLM_SIZE];
-    scalar_t *as = &slm[0];
-    scalar_t *bs;
+    constexpr int SLM_SIZE = BLOCK_K * (BLOCK_M + BLOCK_N) * 2;
     constexpr int BLOCK_KM_SIZE = BLOCK_K * BLOCK_M;
     constexpr int BLOCK_KN_SIZE = BLOCK_K * BLOCK_N;
-    if constexpr (DOUBLE_BUFFER) {
-        bs = as + BLOCK_KM_SIZE * 2;
-    } else {
-        bs = as + BLOCK_KM_SIZE;
-    }
+    __shared__ scalar_t slm[SLM_SIZE];
+    scalar_t *as = &slm[0];
+    scalar_t *bs = as + BLOCK_KM_SIZE * 2;
 
     // init o_reg
     scalar_t o_reg[WARP_M_STEPS * WARP_N_STEPS][VEC_M * VEC_N] = {{(scalar_t)0}};
     using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
                                  WARP_M_STEPS, WARP_N_STEPS, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N>;
-    using ldg_vec_t = typename BlockTileT::ldg_vec_t;
-    ldg_vec_t ldg_a_reg[BlockTileT::LDG_REG_A_COUNT];
-    ldg_vec_t ldg_b_reg[BlockTileT::LDG_REG_B_COUNT];
     BlockTileT block_tile(tid);
 
-    int write_stage_idx = 0;
-    int read_stage_idx = DOUBLE_BUFFER ? 1 : 0;
+    int current_stage = 0;
+    int next_stage = 1;
+    int a_begin = block_y * BLOCK_M * k;
+    int b_begin = block_x * BLOCK_N;
+    int a_end = block_y * BLOCK_M * k + k;
 
-    for (
-        int a_begin = block_y * BLOCK_M * k, b_begin = block_x * BLOCK_N;
-        a_begin < block_y * BLOCK_M * k + k;
-        a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
-        {
-            block_tile.ldg(
-                ldg_a_reg,
-                ldg_b_reg,
-                &a[a_begin],
-                k,
-                &b[b_begin],
-                n);
-            block_tile.sts(
-                &as[write_stage_idx * BLOCK_KM_SIZE],
-                &bs[write_stage_idx * BLOCK_KN_SIZE],
-                ldg_a_reg,
-                ldg_b_reg);
-            if constexpr (DOUBLE_BUFFER) {
-                read_stage_idx ^= 1;
-                write_stage_idx ^= 1;
-            }
-            __syncthreads();
-        }
+    block_tile.ldg(&a[a_begin], k, &b[b_begin], n);
+    block_tile.sts(&as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE]);
+    __syncthreads();
 
-        {
-            block_tile(o_reg, as + read_stage_idx * BLOCK_KM_SIZE, bs + read_stage_idx * BLOCK_KN_SIZE);
+    for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
+        bool has_next = a_begin + BLOCK_K < a_end;
+        if (has_next) {
+            block_tile.ldg(&a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
         }
-
-        if constexpr (!DOUBLE_BUFFER) {
-            __syncthreads();
+        block_tile(o_reg, as + current_stage * BLOCK_KM_SIZE, bs + current_stage * BLOCK_KN_SIZE);
+        if (has_next) {
+            block_tile.sts(&as[next_stage * BLOCK_KM_SIZE], &bs[next_stage * BLOCK_KN_SIZE]);
         }
+        __syncthreads();
+        current_stage ^= 1;
+        next_stage ^= 1;
     }
 
     { // write back
@@ -294,7 +272,7 @@ __global__ void sgemm_kernel(
     }
 }
 
-template <typename scalar_t, int BLOCK_M, int BLOCK_N, bool DOUBLE_BUFFER>
+template <typename scalar_t, int BLOCK_M, int BLOCK_N>
 void sgemm_(
     scalar_t *out,
     const scalar_t *a,
@@ -316,50 +294,50 @@ void sgemm_(
         constexpr int BLOCK_K = 32;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 1, /*WARP_N_STEPS*/ 1,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 32 && BLOCK_N == 64) {
         dim3 block(128);
         constexpr int BLOCK_K = 32;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 1, /*WARP_N_STEPS*/ 1,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         dim3 block(256);
-        constexpr int BLOCK_K = 16;
+        constexpr int BLOCK_K = 8;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 64 && BLOCK_N == 128) {
         dim3 block(128);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 64) {
         dim3 block(256);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 1,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 256 && BLOCK_N == 128) {
         dim3 block(256);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 4, /*WARP_N_STEPS*/ 2,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 256) {
         dim3 block(256);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 4,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
-                     DOUBLE_BUFFER><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
     } else {
         assert(false);
     }
@@ -376,13 +354,13 @@ void sgemm(
     gpuStream_t stream) {
     auto min_size = std::min(m, n);
     if (min_size <= 512) {
-        sgemm_<scalar_t, 64, 64, true>(out, a, b, m, n, k, alpha, beta, stream);
+        sgemm_<scalar_t, 64, 64>(out, a, b, m, n, k, alpha, beta, stream);
     } else if (min_size <= 1024) {
-        sgemm_<scalar_t, 128, 64, true>(out, a, b, m, n, k, alpha, beta, stream);
+        sgemm_<scalar_t, 128, 64>(out, a, b, m, n, k, alpha, beta, stream);
     } else if (min_size <= 8192) {
-        sgemm_<scalar_t, 128, 128, true>(out, a, b, m, n, k, alpha, beta, stream);
+        sgemm_<scalar_t, 128, 128>(out, a, b, m, n, k, alpha, beta, stream);
     } else {
-        sgemm_<scalar_t, 256, 128, true>(out, a, b, m, n, k, alpha, beta, stream);
+        sgemm_<scalar_t, 256, 128>(out, a, b, m, n, k, alpha, beta, stream);
     }
 }
 
