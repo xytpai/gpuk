@@ -111,6 +111,7 @@ struct BlockTile {
         LDG_B_X_THREADS = BLOCK_N / LDG_VEC_SIZE,
         LDG_REG_A_COUNT = BLOCK_KM_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
         LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
+        APAD = 4,
     };
     static_assert(WARP_M_THREADS * WARP_N_THREADS == 32);
     static_assert(LDG_REG_A_COUNT >= 1 && LDG_REG_B_COUNT >= 1);
@@ -149,10 +150,45 @@ struct BlockTile {
         }
     }
 
+    __device__ __forceinline__ void ldg_copy_async(
+        scalar_t *as, scalar_t *bs,
+        const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
+        constexpr int BYTES_PER_COPY = sizeof(ldg_vec_t);
+        as_ = as;
+        a_ = a;
+        a_stride_ = a_stride;
+#pragma unroll
+        for (int i = 0; i < LDG_REG_B_COUNT; i++) {
+            auto dst = (uint32_t)(__cvta_generic_to_shared(&(reinterpret_cast<ldg_vec_t *>(bs)[BLOCK_THREADS * i + tid])));
+            auto src = reinterpret_cast<uint64_t>(&(reinterpret_cast<ldg_vec_t *>(
+                const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx]));
+            asm volatile(
+                "cp.async.ca.shared.global [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(BYTES_PER_COPY));
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
+
+    __device__ __forceinline__ void convert_layout() {
+#pragma unroll
+        for (int i = 0; i < LDG_REG_A_COUNT; i++)
+            ldg_a_reg[i] = reinterpret_cast<ldg_vec_t *>(
+                const_cast<scalar_t *>(a_) + ((BLOCK_THREADS * i + tid) / LDG_A_X_THREADS) * a_stride_)[ldg_a_vec_idx];
+#pragma unroll
+        for (int i = 0; i < LDG_REG_A_COUNT; i++) {
+            int y = (BLOCK_THREADS * i + tid) / LDG_A_X_THREADS;
+#pragma unroll
+            for (int j = 0; j < LDG_VEC_SIZE; j++) {
+                int x = ldg_a_vec_idx * LDG_VEC_SIZE + j;
+                as_[x * (BLOCK_M + APAD) + y] = ldg_a_reg[i].val[j];
+            }
+        }
+        asm volatile("cp.async.wait_group 0;\n" ::);
+    }
+
     __device__ __forceinline__ void operator()(scalar_t (*o)[VEC_M * VEC_N], scalar_t *a, scalar_t *b) {
         int warp_y = wid / BLOCK_N_WARPS * WARP_M;
         int warp_x = wid % BLOCK_N_WARPS * WARP_N;
-        WarpTile<scalar_t, BLOCK_K, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N, BLOCK_M, BLOCK_N> warp_tile;
+        WarpTile<scalar_t, BLOCK_K, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N, BLOCK_M + APAD, BLOCK_N> warp_tile;
 #pragma unroll
         for (int i = 0; i < WARP_M_STEPS; ++i) {
 #pragma unroll
@@ -173,6 +209,9 @@ private:
     int ldg_b_vec_idx;
     ldg_vec_t ldg_a_reg[LDG_REG_A_COUNT];
     ldg_vec_t ldg_b_reg[LDG_REG_B_COUNT];
+    scalar_t *as_;
+    const scalar_t *a_;
+    int a_stride_;
 };
 
 template <
@@ -206,37 +245,40 @@ __global__ void sgemm_kernel(
     int block_x = blockIdx.z * gridDim.x + blockIdx.x;
 
     // get slm
-    constexpr int SLM_SIZE = BLOCK_K * (BLOCK_M + BLOCK_N) * 2;
-    constexpr int BLOCK_KM_SIZE = BLOCK_K * BLOCK_M;
+    using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
+                                 WARP_M_STEPS, WARP_N_STEPS, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N>;
+    constexpr int SLM_SIZE = BLOCK_K * (BLOCK_M + BlockTileT::APAD + BLOCK_N) * 2;
+    constexpr int BLOCK_KM_SIZE = BLOCK_K * (BLOCK_M + BlockTileT::APAD);
     constexpr int BLOCK_KN_SIZE = BLOCK_K * BLOCK_N;
     __shared__ scalar_t slm[SLM_SIZE];
     scalar_t *as = &slm[0];
     scalar_t *bs = as + BLOCK_KM_SIZE * 2;
 
-    // init o_reg
+    // init regs
     scalar_t o_reg[WARP_M_STEPS * WARP_N_STEPS][VEC_M * VEC_N] = {{(scalar_t)0}};
-    using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
-                                 WARP_M_STEPS, WARP_N_STEPS, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N>;
     BlockTileT block_tile(tid);
-
     int current_stage = 0;
     int next_stage = 1;
     int a_begin = block_y * BLOCK_M * k;
     int b_begin = block_x * BLOCK_N;
     int a_end = block_y * BLOCK_M * k + k;
 
-    block_tile.ldg(&a[a_begin], k, &b[b_begin], n);
-    block_tile.sts(&as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE]);
+    block_tile.ldg_copy_async(
+        &as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE],
+        &a[a_begin], k, &b[b_begin], n);
+    block_tile.convert_layout();
     __syncthreads();
 
     for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
         bool has_next = a_begin + BLOCK_K < a_end;
         if (has_next) {
-            block_tile.ldg(&a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
+            block_tile.ldg_copy_async(
+                &as[next_stage * BLOCK_KM_SIZE], &bs[next_stage * BLOCK_KN_SIZE],
+                &a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
         }
-        block_tile(o_reg, as + current_stage * BLOCK_KM_SIZE, bs + current_stage * BLOCK_KN_SIZE);
+        block_tile(o_reg, &as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE]);
         if (has_next) {
-            block_tile.sts(&as[next_stage * BLOCK_KM_SIZE], &bs[next_stage * BLOCK_KN_SIZE]);
+            block_tile.convert_layout();
         }
         __syncthreads();
         current_stage ^= 1;
@@ -305,7 +347,7 @@ void sgemm_(
             out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         dim3 block(256);
-        constexpr int BLOCK_K = 8;
+        constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
@@ -315,27 +357,6 @@ void sgemm_(
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
-    } else if constexpr (BLOCK_M == 128 && BLOCK_N == 64) {
-        dim3 block(256);
-        constexpr int BLOCK_K = 16;
-        sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 1,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
-    } else if constexpr (BLOCK_M == 256 && BLOCK_N == 128) {
-        dim3 block(256);
-        constexpr int BLOCK_K = 16;
-        sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 4, /*WARP_N_STEPS*/ 2,
-                     /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
-    } else if constexpr (BLOCK_M == 128 && BLOCK_N == 256) {
-        dim3 block(256);
-        constexpr int BLOCK_K = 16;
-        sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
-                     /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 4,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
             out, a, b, m, n, k, alpha, beta);
     } else {
@@ -355,12 +376,8 @@ void sgemm(
     auto min_size = std::min(m, n);
     if (min_size <= 512) {
         sgemm_<scalar_t, 64, 64>(out, a, b, m, n, k, alpha, beta, stream);
-    } else if (min_size <= 1024) {
-        sgemm_<scalar_t, 128, 64>(out, a, b, m, n, k, alpha, beta, stream);
-    } else if (min_size <= 8192) {
-        sgemm_<scalar_t, 128, 128>(out, a, b, m, n, k, alpha, beta, stream);
     } else {
-        sgemm_<scalar_t, 256, 128>(out, a, b, m, n, k, alpha, beta, stream);
+        sgemm_<scalar_t, 64, 128>(out, a, b, m, n, k, alpha, beta, stream);
     }
 }
 
