@@ -103,4 +103,28 @@ struct alignas(sizeof(scalar_t) * vec_size) aligned_array {
     scalar_t val[vec_size];
 };
 
+struct CopyAsync {
+    template <typename T>
+    static __device__ __forceinline__ void add(T *dst, T *src) {
+#ifdef __CUDACC__
+        constexpr int NBYTES = sizeof(T);
+        auto dst_ = (uint32_t)(__cvta_generic_to_shared(dst));
+        auto src_ = reinterpret_cast<uint64_t>(src);
+        asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n" ::"r"(dst_), "l"(src_), "n"(NBYTES));
+#else
+        *dst = *src;
+#endif
+    }
+    static __device__ __forceinline__ void commit() {
+#ifdef __CUDACC__
+        asm volatile("cp.async.commit_group;\n" ::);
+#endif
+    }
+    static __device__ __forceinline__ void wait() {
+#ifdef __CUDACC__
+        asm volatile("cp.async.wait_group 0;\n" ::);
+#endif
+    }
+};
+
 } // namespace kernel_utils

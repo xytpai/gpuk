@@ -153,19 +153,17 @@ struct BlockTile {
     __device__ __forceinline__ void ldg_copy_async(
         scalar_t *as, scalar_t *bs,
         const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
-        constexpr int BYTES_PER_COPY = sizeof(ldg_vec_t);
         as_ = as;
         a_ = a;
         a_stride_ = a_stride;
 #pragma unroll
         for (int i = 0; i < LDG_REG_B_COUNT; i++) {
-            auto dst = (uint32_t)(__cvta_generic_to_shared(&(reinterpret_cast<ldg_vec_t *>(bs)[BLOCK_THREADS * i + tid])));
-            auto src = reinterpret_cast<uint64_t>(&(reinterpret_cast<ldg_vec_t *>(
-                const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx]));
-            asm volatile(
-                "cp.async.ca.shared.global [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(BYTES_PER_COPY));
+            CopyAsync::add(
+                &(reinterpret_cast<ldg_vec_t *>(bs)[BLOCK_THREADS * i + tid]),
+                &(reinterpret_cast<ldg_vec_t *>(
+                    const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx]));
         }
-        asm volatile("cp.async.commit_group;\n" ::);
+        CopyAsync::commit();
     }
 
     __device__ __forceinline__ void convert_layout() {
@@ -182,7 +180,7 @@ struct BlockTile {
                 as_[x * (BLOCK_M + APAD) + y] = ldg_a_reg[i].val[j];
             }
         }
-        asm volatile("cp.async.wait_group 0;\n" ::);
+        CopyAsync::wait();
     }
 
     __device__ __forceinline__ void operator()(scalar_t (*o)[VEC_M * VEC_N], scalar_t *a, scalar_t *b) {
