@@ -63,11 +63,11 @@ template <
     int KSTRIDE_A,
     int KSTRIDE_B>
 struct WarpTile {
-    __device__ __forceinline__ void operator()(scalar_t *o, scalar_t *a, scalar_t *b, int w_tid) {
+    __device__ __forceinline__ void operator()(scalar_t *o, scalar_t *a, scalar_t *b, int wy, int wx, int w_tid) {
         using a_vec_t = aligned_array<scalar_t, VEC_M>;
         using b_vec_t = aligned_array<scalar_t, VEC_N>;
-        int th_y = w_tid / WARP_N_THREADS * VEC_M;
-        int th_x = w_tid % WARP_N_THREADS * VEC_N;
+        int th_y = wy + w_tid / WARP_N_THREADS * VEC_M;
+        int th_x = wx + w_tid % WARP_N_THREADS * VEC_N;
         mma_reg_t<scalar_t, VEC_M, VEC_N> reg;
 #pragma unroll
         for (int k = 0; k < BLOCK_K; ++k) {
@@ -111,7 +111,7 @@ struct BlockTile {
         LDG_B_X_THREADS = BLOCK_N / LDG_VEC_SIZE,
         LDG_REG_A_COUNT = BLOCK_KM_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
         LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
-        APAD = 4,
+        APAD = 4, // swizzle is not a good idea for sgemm
     };
     static_assert(WARP_M_THREADS * WARP_N_THREADS == 32);
     static_assert(LDG_REG_A_COUNT >= 1 && LDG_REG_B_COUNT >= 1);
@@ -189,12 +189,11 @@ struct BlockTile {
         WarpTile<scalar_t, BLOCK_K, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N, BLOCK_M + APAD, BLOCK_N> warp_tile;
 #pragma unroll
         for (int i = 0; i < WARP_M_STEPS; ++i) {
+            int warp_atom_offset_y = warp_y + i * WARP_ATOM_M;
 #pragma unroll
             for (int j = 0; j < WARP_N_STEPS; ++j) {
-                auto a_ = a + warp_y + i * WARP_ATOM_M;
-                auto b_ = b + warp_x + j * WARP_ATOM_N;
-                auto o_ = o[i * WARP_N_STEPS + j];
-                warp_tile(o_, a_, b_, w_tid);
+                int warp_atom_offset_x = warp_x + j * WARP_ATOM_N;
+                warp_tile(o[i * WARP_N_STEPS + j], a, b, warp_atom_offset_y, warp_atom_offset_x, w_tid);
             }
         }
     }
