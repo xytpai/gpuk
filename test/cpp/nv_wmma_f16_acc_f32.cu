@@ -25,11 +25,11 @@ struct MMA_M16N8K16 {
     using FragmentB = aligned_array<scalar_t, 4>;
     using FragmentC = aligned_array<acc_t, 4>;
 
-    __forceinline__ __device__ MMA_M16N8K16() {
+    __device__ __forceinline__ MMA_M16N8K16() {
         w_tid = threadIdx.x & 31;
     }
 
-    __forceinline__ __device__ void operator()() {
+    __device__ __forceinline__ void operator()() {
         uint32_t const *A = reinterpret_cast<uint32_t const *>(&a);
         uint32_t const *B = reinterpret_cast<uint32_t const *>(&b);
         float const *C = reinterpret_cast<float const *>(&c);
@@ -42,14 +42,14 @@ struct MMA_M16N8K16 {
               "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
     }
 
-    __forceinline__ __device__ void fill_fragment_c(acc_t val) {
+    __device__ __forceinline__ void fill_fragment_c(acc_t val) {
         c.val[0] = val;
         c.val[1] = val;
         c.val[2] = val;
         c.val[3] = val;
     }
 
-    __forceinline__ __device__ void load_matrix_a(scalar_t *ptr, int stride) {
+    __device__ __forceinline__ void load_matrix_a(scalar_t *ptr, int stride) {
 #ifdef __CUDACC__
         auto A = reinterpret_cast<uint32_t *>(&a);
         auto addr = (uint32_t)__cvta_generic_to_shared(ptr + (w_tid % 16) * stride + (w_tid / 16) * 8);
@@ -68,7 +68,7 @@ struct MMA_M16N8K16 {
 #endif
     }
 
-    __forceinline__ __device__ void load_matrix_b(scalar_t *ptr, int stride) {
+    __device__ __forceinline__ void load_matrix_b(scalar_t *ptr, int stride) {
 #ifdef __CUDACC__
         auto B = reinterpret_cast<uint32_t *>(&b);
         auto addr = (uint32_t)__cvta_generic_to_shared(ptr + (w_tid % 16) * stride);
@@ -86,7 +86,7 @@ struct MMA_M16N8K16 {
 #endif
     }
 
-    __forceinline__ __device__ void store_matrix(acc_t *ptr, int stride, acc_t alpha, acc_t beta) {
+    __device__ __forceinline__ void store_matrix(acc_t *ptr, int stride, acc_t alpha, acc_t beta) {
         auto y = w_tid / 4;
         auto x = w_tid % 4 * 2;
         using vec_t = aligned_array<acc_t, 2>;
