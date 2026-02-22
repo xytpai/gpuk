@@ -63,7 +63,7 @@ template <
     int KSTRIDE_A,
     int KSTRIDE_B>
 struct WarpTile {
-    __device__ __forceinline__ void operator()(scalar_t *o, scalar_t *a, scalar_t *b, int wy, int wx, int w_tid) {
+    __device__ __forceinline__ void operator()(scalar_t *o, scalar_t *as, scalar_t *bs, int wy, int wx, int w_tid) {
         using a_vec_t = aligned_array<scalar_t, VEC_M>;
         using b_vec_t = aligned_array<scalar_t, VEC_N>;
         int th_y = wy + w_tid / WARP_N_THREADS * VEC_M;
@@ -71,8 +71,8 @@ struct WarpTile {
         mma_reg_t<scalar_t, VEC_M, VEC_N> reg;
 #pragma unroll
         for (int k = 0; k < BLOCK_K; ++k) {
-            reg.a_vec = *reinterpret_cast<a_vec_t *>(&a[k * KSTRIDE_A + th_y]);
-            reg.b_vec = *reinterpret_cast<b_vec_t *>(&b[k * KSTRIDE_B + th_x]);
+            reg.a_vec = *reinterpret_cast<a_vec_t *>(&as[k * KSTRIDE_A + th_y]);
+            reg.b_vec = *reinterpret_cast<b_vec_t *>(&bs[k * KSTRIDE_B + th_x]);
 #pragma unroll
             for (int i = 0; i < VEC_M; ++i) {
 #pragma unroll
@@ -111,7 +111,7 @@ struct BlockTile {
         LDG_B_X_THREADS = BLOCK_N / LDG_VEC_SIZE,
         LDG_REG_A_COUNT = BLOCK_KM_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
         LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
-        APAD = 4, // swizzle is not a good idea for sgemm
+        APAD = LDG_VEC_SIZE, // swizzle is not a good idea for sgemm
     };
     static_assert(WARP_M_THREADS * WARP_N_THREADS == 32);
     static_assert(LDG_REG_A_COUNT >= 1 && LDG_REG_B_COUNT >= 1);
@@ -183,7 +183,7 @@ struct BlockTile {
         CopyAsync::wait();
     }
 
-    __device__ __forceinline__ void operator()(scalar_t (*o)[VEC_M * VEC_N], scalar_t *a, scalar_t *b) {
+    __device__ __forceinline__ void operator()(scalar_t (*o)[VEC_M * VEC_N], scalar_t *as, scalar_t *bs) {
         int warp_y = wid / BLOCK_N_WARPS * WARP_M;
         int warp_x = wid % BLOCK_N_WARPS * WARP_N;
         WarpTile<scalar_t, BLOCK_K, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N, BLOCK_M + APAD, BLOCK_N> warp_tile;
@@ -193,7 +193,7 @@ struct BlockTile {
 #pragma unroll
             for (int j = 0; j < WARP_N_STEPS; ++j) {
                 int warp_atom_offset_x = warp_x + j * WARP_ATOM_N;
-                warp_tile(o[i * WARP_N_STEPS + j], a, b, warp_atom_offset_y, warp_atom_offset_x, w_tid);
+                warp_tile(o[i * WARP_N_STEPS + j], as, bs, warp_atom_offset_y, warp_atom_offset_x, w_tid);
             }
         }
     }

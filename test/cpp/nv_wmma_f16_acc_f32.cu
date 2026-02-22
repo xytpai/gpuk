@@ -20,12 +20,12 @@ struct alignas(sizeof(scalar_t) * vec_size) aligned_array {
 };
 
 template <typename scalar_t, typename acc_t>
-struct MMA_M16N8K16 {
+struct WMMA_M16N8K16 {
     using FragmentA = aligned_array<scalar_t, 8>;
     using FragmentB = aligned_array<scalar_t, 4>;
     using FragmentC = aligned_array<acc_t, 4>;
 
-    __device__ __forceinline__ MMA_M16N8K16() {
+    __device__ __forceinline__ WMMA_M16N8K16() {
         w_tid = threadIdx.x & 31;
     }
 
@@ -131,7 +131,7 @@ __global__ void wmma_loop_kernel(float *o, scalar_t *a, scalar_t *b) {
         }
     }
     __syncthreads();
-    MMA_M16N8K16<scalar_t, float> mma;
+    WMMA_M16N8K16<scalar_t, float> mma;
     mma.fill_fragment_c(0);
     mma.load_matrix_a(as_, WK);
     mma.load_matrix_b(bs_, WN);
