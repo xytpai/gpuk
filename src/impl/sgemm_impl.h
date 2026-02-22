@@ -12,16 +12,16 @@ __global__ void sgemm_naive_kernel(
     const scalar_t *a,
     const scalar_t *b,
     const int m, const int n, const int k,
-    const scalar_t alpha,
-    const scalar_t beta) {
+    const float alpha,
+    const float beta) {
     int mi = blockIdx.y * 32 + threadIdx.y;
     int ni = blockIdx.x * 32 + threadIdx.x;
     if (mi < m && ni < n) {
         float acc = 0.f;
         for (int ki = 0; ki < k; ki++) {
-            acc += a[mi * k + ki] * b[ki * n + ni];
+            acc += (float)a[mi * k + ki] * (float)b[ki * n + ni];
         }
-        out[mi * n + ni] = alpha * acc + beta * out[mi * n + ni];
+        out[mi * n + ni] = (scalar_t)(alpha * acc + beta * (float)out[mi * n + ni]);
     }
 }
 
@@ -31,8 +31,8 @@ void sgemm_naive(
     const scalar_t *a,
     const scalar_t *b,
     const int m, const int n, const int k,
-    const scalar_t alpha,
-    const scalar_t beta,
+    const float alpha,
+    const float beta,
     gpuStream_t stream) {
     dim3 block(32, 32);
     dim3 grid((n + 32 - 1) / 32, (m + 32 - 1) / 32);

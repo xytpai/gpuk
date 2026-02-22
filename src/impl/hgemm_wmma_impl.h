@@ -30,7 +30,7 @@ struct WMMA_M16N8K16 {
         uint32_t const *A = reinterpret_cast<uint32_t const *>(&a);
         uint32_t const *B = reinterpret_cast<uint32_t const *>(&b);
         acc_t const *C = reinterpret_cast<acc_t const *>(&c);
-        acc_t *D = reinterpret_cast<acc_t *>(d);
+        acc_t *D = reinterpret_cast<acc_t *>(&d);
         asm volatile(
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
             "{%10,%11,%12,%13};\n"
@@ -40,14 +40,14 @@ struct WMMA_M16N8K16 {
 #endif
     }
 
-    __device__ __forceinline__ void fill_fragment_c(FragmentCT &c) {
-        c.val[0] = val;
-        c.val[1] = val;
-        c.val[2] = val;
-        c.val[3] = val;
+    __device__ __forceinline__ void reset_fragment_c(FragmentCT &c) {
+        c.val[0] = 0;
+        c.val[1] = 0;
+        c.val[2] = 0;
+        c.val[3] = 0;
     }
 
-    __device__ __forceinline__ void load_matrix_a(FragmentAT &a, int stride) {
+    __device__ __forceinline__ void load_matrix_a(FragmentAT &a, scalar_t *ptr, int stride) {
 #ifdef __CUDACC__
         auto A = reinterpret_cast<uint32_t *>(&a);
         auto addr = (uint32_t)__cvta_generic_to_shared(ptr + (w_tid % 16) * stride + (w_tid / 16) * 8);
@@ -58,7 +58,7 @@ struct WMMA_M16N8K16 {
 #endif
     }
 
-    __device__ __forceinline__ void load_matrix_b(FragmentBT &b, int stride) {
+    __device__ __forceinline__ void load_matrix_b(FragmentBT &b, scalar_t *ptr, int stride) {
 #ifdef __CUDACC__
         auto B = reinterpret_cast<uint32_t *>(&b);
         auto addr = (uint32_t)__cvta_generic_to_shared(ptr + (w_tid % 16) * stride);
@@ -69,16 +69,16 @@ struct WMMA_M16N8K16 {
 #endif
     }
 
-    __device__ __forceinline__ void store_matrix(acc_t *ptr, int stride, FragmentCT const &c, acc_t alpha, acc_t beta) {
+    __device__ __forceinline__ void store_matrix(scalar_t *ptr, int stride, FragmentCT const &c, acc_t alpha, acc_t beta) {
         auto y = w_tid / 4;
         auto x = w_tid % 4 * 2;
-        using vec_t = aligned_array<acc_t, 2>;
+        using vec_t = aligned_array<scalar_t, 2>;
         auto vec0 = *reinterpret_cast<vec_t *>(&ptr[y * stride + x]);
         auto vec1 = *reinterpret_cast<vec_t *>(&ptr[(y + 8) * stride + x]);
-        vec0.val[0] = alpha * (acc_t)c.val[0] + beta * vec0.val[0];
-        vec0.val[1] = alpha * (acc_t)c.val[1] + beta * vec0.val[1];
-        vec1.val[0] = alpha * (acc_t)c.val[2] + beta * vec1.val[0];
-        vec1.val[1] = alpha * (acc_t)c.val[3] + beta * vec1.val[1];
+        vec0.val[0] = alpha * (acc_t)c.val[0] + beta * (acc_t)vec0.val[0];
+        vec0.val[1] = alpha * (acc_t)c.val[1] + beta * (acc_t)vec0.val[1];
+        vec1.val[0] = alpha * (acc_t)c.val[2] + beta * (acc_t)vec1.val[0];
+        vec1.val[1] = alpha * (acc_t)c.val[3] + beta * (acc_t)vec1.val[1];
         *reinterpret_cast<vec_t *>(&ptr[y * stride + x]) = vec0;
         *reinterpret_cast<vec_t *>(&ptr[(y + 8) * stride + x]) = vec1;
     }
@@ -124,6 +124,13 @@ struct BlockTile {
         tid(tid), wid(tid >> 5), w_tid(tid & 31),
         ldg_a_vec_idx(tid % LDG_A_X_THREADS),
         ldg_b_vec_idx(tid % LDG_B_X_THREADS) {
+#pragma unroll
+        for (int i = 0; i < WARP_M_STEPS; ++i) {
+#pragma unroll
+            for (int j = 0; j < WARP_N_STEPS; ++j) {
+                wmma.reset_fragment_c(fo[i][j]);
+            }
+        }
     }
 
     __device__ __forceinline__ void ldg(const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
@@ -150,6 +157,30 @@ struct BlockTile {
         }
     }
 
+    __device__ __forceinline__ void ldg_copy_async(
+        scalar_t *as, scalar_t *bs,
+        const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
+#pragma unroll
+        for (int i = 0; i < LDG_REG_A_COUNT; i++) {
+            CopyAsync::add(
+                &(reinterpret_cast<ldg_vec_t *>(as)[BLOCK_THREADS * i + tid]),
+                &(reinterpret_cast<ldg_vec_t *>(
+                    const_cast<scalar_t *>(a) + ((BLOCK_THREADS * i + tid) / LDG_A_X_THREADS) * a_stride)[ldg_a_vec_idx]));
+        }
+#pragma unroll
+        for (int i = 0; i < LDG_REG_B_COUNT; i++) {
+            CopyAsync::add(
+                &(reinterpret_cast<ldg_vec_t *>(bs)[BLOCK_THREADS * i + tid]),
+                &(reinterpret_cast<ldg_vec_t *>(
+                    const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx]));
+        }
+        CopyAsync::commit();
+    }
+
+    __device__ __forceinline__ void wait() {
+        CopyAsync::wait();
+    }
+
     __device__ __forceinline__ void load_matrix(scalar_t *as, scalar_t *bs) {
         int warp_y = wid / BLOCK_N_WARPS * WARP_M;
         int warp_x = wid % BLOCK_N_WARPS * WARP_N;
@@ -166,7 +197,25 @@ struct BlockTile {
             int warp_atom_offset_x = warp_x + j * WARP_ATOM_N;
 #pragma unroll
             for (int k = 0; k < WARP_K_STEPS; ++k) {
-                wmma.load_matrix_b(fa[k][j], bs + warp_atom_offset_x + k * BLOCK_N, BLOCK_N);
+                wmma.load_matrix_b(fb[k][j], bs + warp_atom_offset_x + k * WARP_ATOM_K * BLOCK_N, BLOCK_N);
+            }
+        }
+    }
+
+    __device__ __forceinline__ void store_matrix(scalar_t *ptr, int by, int bx, int m, int n, float alpha, float beta) {
+        int warp_y = by * BLOCK_M + wid / BLOCK_N_WARPS * WARP_M;
+        int warp_x = bx * BLOCK_N + wid % BLOCK_N_WARPS * WARP_N;
+#pragma unroll
+        for (int i = 0; i < WARP_M_STEPS; ++i) {
+            int warp_atom_offset_y = warp_y + i * WARP_ATOM_M;
+#pragma unroll
+            for (int j = 0; j < WARP_N_STEPS; ++j) {
+                int warp_atom_offset_x = warp_x + j * WARP_ATOM_N;
+                if (warp_atom_offset_y < m && warp_atom_offset_x < n) {
+                    auto ptr_ = ptr + warp_atom_offset_y * n + warp_atom_offset_x;
+                    wmma.store_matrix(ptr_, n, fo[i][j], alpha, beta);
+                    __syncthreads();
+                }
             }
         }
     }
@@ -178,7 +227,7 @@ struct BlockTile {
             for (int j = 0; j < WARP_N_STEPS; ++j) {
 #pragma unroll
                 for (int k = 0; k < WARP_K_STEPS; ++k) {
-                    nvcuda::wmma::mma_sync(fo[i][j], fa[k][i], fb[k][j], fo[i][j]);
+                    wmma(fo[i][j], fa[k][i], fb[k][j], fo[i][j]);
                 }
             }
         }
@@ -197,5 +246,119 @@ private:
     FragmentBT fb[WARP_K_STEPS][WARP_N_STEPS];
     FragmentCT fo[WARP_M_STEPS][WARP_N_STEPS];
 };
+
+template <
+    typename scalar_t,
+    int BLOCK_K,
+    int BLOCK_M_WARPS,
+    int BLOCK_N_WARPS,
+    int WARP_M_STEPS,
+    int WARP_N_STEPS>
+__global__ void hgemm_kernel(
+    scalar_t *out,
+    const scalar_t *a,
+    const scalar_t *b,
+    const int m, const int n, const int k,
+    const float alpha,
+    const float beta) {
+    using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS, WARP_M_STEPS, WARP_N_STEPS>;
+    constexpr int BLOCK_M = BlockTileT::BLOCK_M;
+    constexpr int BLOCK_N = BlockTileT::BLOCK_N;
+
+    // get idx
+    int tid = threadIdx.x;
+    int block_y = blockIdx.y;
+    int block_x = blockIdx.z * gridDim.x + blockIdx.x;
+
+    // get slm
+    __shared__ scalar_t as[2][BLOCK_M * BLOCK_K];
+    __shared__ scalar_t bs[2][BLOCK_K * BLOCK_N];
+
+    // init regs
+    BlockTileT block_tile(tid);
+    int current_stage = 0;
+    int next_stage = 1;
+    int a_begin = block_y * BLOCK_M * k;
+    int b_begin = block_x * BLOCK_N;
+    int a_end = a_begin + k;
+
+    block_tile.ldg_copy_async(as[current_stage], bs[current_stage], &a[a_begin], k, &b[b_begin], n);
+    block_tile.wait();
+    __syncthreads();
+
+    for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
+        bool has_next = (a_begin + BLOCK_K) < a_end;
+        if (has_next) {
+            block_tile.ldg_copy_async(as[next_stage], bs[next_stage], &a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
+        }
+        block_tile.load_matrix(as[current_stage], bs[current_stage]);
+        block_tile();
+        if (has_next) {
+            block_tile.wait();
+        }
+        __syncthreads();
+        current_stage ^= 1;
+        next_stage ^= 1;
+    }
+
+    block_tile.store_matrix(out, block_y, block_x, m, n, alpha, beta);
+}
+
+template <typename scalar_t, int BLOCK_M, int BLOCK_N>
+void hgemm_(
+    scalar_t *out,
+    const scalar_t *a,
+    const scalar_t *b,
+    const int m, const int n, const int k,
+    const float alpha,
+    const float beta,
+    gpuStream_t stream) {
+    constexpr int VEC_SIZE = 16 / sizeof(scalar_t);
+    assert(m % VEC_SIZE == 0);
+    assert(n % VEC_SIZE == 0);
+    assert(k % VEC_SIZE == 0);
+    int m_blocks = (m + BLOCK_M - 1) / BLOCK_M;
+    int n_blocks = (n + BLOCK_N - 1) / BLOCK_N;
+    int split_num = (n_blocks + 128 - 1) / 128;
+    dim3 grid((n_blocks + split_num - 1) / split_num, m_blocks, split_num);
+    if constexpr (BLOCK_M == 64 && BLOCK_N == 32) {
+        dim3 block(128);
+        constexpr int BLOCK_K = 32;
+        hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2,
+                     /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
+    } else if constexpr (BLOCK_M == 64 && BLOCK_N == 64) {
+        dim3 block(256);
+        constexpr int BLOCK_K = 32;
+        hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 4,
+                     /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
+    } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
+        dim3 block(256);
+        constexpr int BLOCK_K = 32;
+        hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 4,
+                     /*WARP_M_STEPS*/ 4, /*WARP_N_STEPS*/ 4><<<grid, block, 0, stream>>>(
+            out, a, b, m, n, k, alpha, beta);
+    } else {
+        assert(false);
+    }
+}
+
+template <typename scalar_t>
+void hgemm(
+    scalar_t *out,
+    const scalar_t *a,
+    const scalar_t *b,
+    const int m, const int n, const int k,
+    const float alpha,
+    const float beta,
+    gpuStream_t stream) {
+    auto min_size = std::min(m, n);
+    if (min_size <= 512) {
+        hgemm_<scalar_t, 64, 64>(out, a, b, m, n, k, alpha, beta, stream);
+    } else {
+        hgemm_<scalar_t, 128, 128>(out, a, b, m, n, k, alpha, beta, stream);
+    }
+}
 
 } // namespace hgemm
