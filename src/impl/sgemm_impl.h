@@ -326,7 +326,7 @@ void sgemm_(
     assert(k % VEC_SIZE == 0);
     int m_blocks = (m + BLOCK_M - 1) / BLOCK_M;
     int n_blocks = (n + BLOCK_N - 1) / BLOCK_N;
-    int split_num = (n_blocks + 128 - 1) / 128;
+    int split_num = (n_blocks + 32 - 1) / 32;
     dim3 grid((n_blocks + split_num - 1) / split_num, m_blocks, split_num);
     if constexpr (BLOCK_M == 64 && BLOCK_N == 64) {
         dim3 block(256);
