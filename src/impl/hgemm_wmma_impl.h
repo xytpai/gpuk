@@ -47,17 +47,17 @@ struct WMMA_M16N8K16 {
         c.val[3] = 0;
     }
 
-    template <uint32_t COL_BITS, uint32_t VEC_BITS = 3, uint32_t ROW_SHIFT_BITS = COL_BITS>
+    template <uint32_t VEC_BITS = 3>
     __device__ __forceinline__ uint32_t swizzle(uint32_t addr) {
-        constexpr auto COL_MASK = ((1 << COL_BITS) - 1) << VEC_BITS;
-        return ((addr >> ROW_SHIFT_BITS) & COL_MASK) ^ addr;
+        constexpr uint32_t COL_BITS = 7 - 4; // 32*4B (7bits) - 16B (4bits)
+        constexpr uint32_t COL_MASK = ((1 << COL_BITS) - 1) << VEC_BITS;
+        return ((addr >> VEC_BITS) & COL_MASK) ^ addr;
     }
 
-    template <uint32_t COL_BITS>
     __device__ __forceinline__ void load_matrix_a(FragmentAT &a, scalar_t *base_ptr, int offset, int stride) {
 #ifdef __CUDACC__
         auto A = reinterpret_cast<uint32_t *>(&a);
-        uint32_t offset_ = swizzle<COL_BITS>(offset + (w_tid % 16) * stride + (w_tid / 16) * 8);
+        uint32_t offset_ = swizzle(offset + (w_tid % 16) * stride + (w_tid / 16) * 8);
         auto addr = (uint32_t)__cvta_generic_to_shared(base_ptr + offset_);
         asm volatile(
             "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
@@ -66,11 +66,10 @@ struct WMMA_M16N8K16 {
 #endif
     }
 
-    template <uint32_t COL_BITS>
     __device__ __forceinline__ void load_matrix_b(FragmentBT &b, scalar_t *base_ptr, int offset, int stride) {
 #ifdef __CUDACC__
         auto B = reinterpret_cast<uint32_t *>(&b);
-        uint32_t offset_ = swizzle<COL_BITS>(offset + (w_tid % 16) * stride);
+        uint32_t offset_ = swizzle(offset + (w_tid % 16) * stride);
         auto addr = (uint32_t)__cvta_generic_to_shared(base_ptr + offset_);
         asm volatile(
             "ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];\n"
@@ -95,16 +94,6 @@ struct WMMA_M16N8K16 {
 
 private:
     int w_tid;
-};
-
-template <int N, int CURRENT_VAL = N, int COUNT = 0>
-struct Log2 {
-    enum { VALUE = Log2<N, (CURRENT_VAL >> 1), COUNT + 1>::VALUE };
-};
-
-template <int N, int COUNT>
-struct Log2<N, 0, COUNT> {
-    enum { VALUE = (1 << (COUNT - 1) < N) ? COUNT : COUNT - 1 };
 };
 
 template <
@@ -136,8 +125,6 @@ struct BlockTile {
         LDG_B_X_THREADS = BLOCK_N / LDG_VEC_SIZE,
         LDG_REG_A_COUNT = BLOCK_MK_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
         LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
-        COL_BITS_A = Log2<BLOCK_K>::VALUE - Log2<LDG_VEC_SIZE>::VALUE,
-        COL_BITS_B = Log2<BLOCK_N>::VALUE - Log2<LDG_VEC_SIZE>::VALUE,
     };
     static_assert(LDG_REG_A_COUNT >= 1 && LDG_REG_B_COUNT >= 1);
     using ldg_vec_t = aligned_array<scalar_t, LDG_VEC_SIZE>;
@@ -155,38 +142,12 @@ struct BlockTile {
         }
     }
 
-    __device__ __forceinline__ void ldg(const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
-#pragma unroll
-        for (int i = 0; i < LDG_REG_A_COUNT; i++)
-            ldg_a_reg[i] = reinterpret_cast<ldg_vec_t *>(
-                const_cast<scalar_t *>(a) + ((BLOCK_THREADS * i + tid) / LDG_A_X_THREADS) * a_stride)[ldg_a_vec_idx];
-#pragma unroll
-        for (int i = 0; i < LDG_REG_B_COUNT; i++)
-            ldg_b_reg[i] = reinterpret_cast<ldg_vec_t *>(
-                const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx];
-    }
-
-    __device__ __forceinline__ void sts(scalar_t *as, scalar_t *bs) {
-        auto as_vec = reinterpret_cast<ldg_vec_t *>(as);
-        auto bs_vec = reinterpret_cast<ldg_vec_t *>(bs);
-#pragma unroll
-        for (int i = 0; i < LDG_REG_A_COUNT; i++) {
-            auto offset = wmma.swizzle<COL_BITS_A>((BLOCK_THREADS * i + tid) * LDG_VEC_SIZE);
-            as_vec[offset / LDG_VEC_SIZE] = ldg_a_reg[i];
-        }
-#pragma unroll
-        for (int i = 0; i < LDG_REG_B_COUNT; i++) {
-            auto offset = wmma.swizzle<COL_BITS_B>((BLOCK_THREADS * i + tid) * LDG_VEC_SIZE);
-            bs_vec[offset / LDG_VEC_SIZE] = ldg_b_reg[i];
-        }
-    }
-
     __device__ __forceinline__ void ldg_copy_async(
         scalar_t *as, scalar_t *bs,
         const scalar_t *a, int a_stride, const scalar_t *b, int b_stride) {
 #pragma unroll
         for (int i = 0; i < LDG_REG_A_COUNT; i++) {
-            auto offset = wmma.swizzle<COL_BITS_A>((BLOCK_THREADS * i + tid) * LDG_VEC_SIZE);
+            auto offset = wmma.swizzle((BLOCK_THREADS * i + tid) * LDG_VEC_SIZE);
             CopyAsync::add(
                 reinterpret_cast<ldg_vec_t *>(as + offset),
                 &(reinterpret_cast<ldg_vec_t *>(
@@ -194,7 +155,7 @@ struct BlockTile {
         }
 #pragma unroll
         for (int i = 0; i < LDG_REG_B_COUNT; i++) {
-            auto offset = wmma.swizzle<COL_BITS_B>((BLOCK_THREADS * i + tid) * LDG_VEC_SIZE);
+            auto offset = wmma.swizzle((BLOCK_THREADS * i + tid) * LDG_VEC_SIZE);
             CopyAsync::add(
                 reinterpret_cast<ldg_vec_t *>(bs + offset),
                 &(reinterpret_cast<ldg_vec_t *>(
@@ -216,7 +177,7 @@ struct BlockTile {
 #pragma unroll
             for (int k = 0; k < WARP_K_STEPS; ++k) {
                 int offset = warp_atom_offset_y * BLOCK_K + k * WARP_ATOM_K;
-                wmma.load_matrix_a<COL_BITS_A>(fa[k][i], as, offset, BLOCK_K);
+                wmma.load_matrix_a(fa[k][i], as, offset, BLOCK_K);
             }
         }
 #pragma unroll
@@ -225,7 +186,7 @@ struct BlockTile {
 #pragma unroll
             for (int k = 0; k < WARP_K_STEPS; ++k) {
                 int offset = warp_atom_offset_x + k * WARP_ATOM_K * BLOCK_N;
-                wmma.load_matrix_b<COL_BITS_B>(fb[k][j], bs, offset, BLOCK_N);
+                wmma.load_matrix_b(fb[k][j], bs, offset, BLOCK_N);
             }
         }
     }
