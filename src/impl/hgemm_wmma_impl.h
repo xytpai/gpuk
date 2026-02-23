@@ -356,10 +356,10 @@ void hgemm_(
                      /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2><<<grid, block, 0, stream>>>(
             out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 64 && BLOCK_N == 64) {
-        dim3 block(256);
+        dim3 block(128);
         constexpr int BLOCK_K = 32;
-        hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 4,
-                     /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2><<<grid, block, 0, stream>>>(
+        hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2,
+                     /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 4><<<grid, block, 0, stream>>>(
             out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         dim3 block(256);
@@ -382,7 +382,7 @@ void hgemm(
     const float beta,
     gpuStream_t stream) {
     auto min_size = std::min(m, n);
-    if (min_size <= 512) {
+    if (min_size <= 2048) {
         hgemm_<scalar_t, 64, 64>(out, a, b, m, n, k, alpha, beta, stream);
     } else {
         hgemm_<scalar_t, 128, 128>(out, a, b, m, n, k, alpha, beta, stream);
