@@ -148,7 +148,8 @@ struct BlockTile {
             int y = (BLOCK_THREADS * i + tid) / LDG_A_X_THREADS;
 #pragma unroll
             for (int j = 0; j < LDG_VEC_SIZE; j++) {
-                as[(ldg_a_vec_idx * LDG_VEC_SIZE + j) * BLOCK_M + y] = ldg_a_reg[i].val[j];
+                int x = ldg_a_vec_idx * LDG_VEC_SIZE + j;
+                as[x * BLOCK_M + y] = ldg_a_reg[i].val[j];
             }
         }
 #pragma unroll
@@ -331,6 +332,8 @@ __global__ void sgemm_kernel(
     }
 }
 
+#ifdef __CUDACC__
+
 template <typename scalar_t, int BLOCK_M, int BLOCK_N>
 void sgemm_(
     scalar_t *out,
@@ -397,5 +400,50 @@ void sgemm(
         sgemm_<scalar_t, 64, 128>(out, a, b, m, n, k, alpha, beta, stream);
     }
 }
+
+#elif defined(__HIPCC__)
+
+template <typename scalar_t, int BLOCK_M, int BLOCK_N>
+void sgemm_(
+    scalar_t *out,
+    const scalar_t *a,
+    const scalar_t *b,
+    const int m, const int n, const int k,
+    const scalar_t alpha,
+    const scalar_t beta,
+    gpuStream_t stream) {
+    constexpr int VEC_SIZE = 16 / sizeof(scalar_t);
+    assert(m % VEC_SIZE == 0);
+    assert(n % VEC_SIZE == 0);
+    assert(k % VEC_SIZE == 0);
+    int m_blocks = (m + BLOCK_M - 1) / BLOCK_M;
+    int n_blocks = (n + BLOCK_N - 1) / BLOCK_N;
+    int split_num = 1;
+    dim3 grid((n_blocks + split_num - 1) / split_num, m_blocks, split_num);
+    if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
+        dim3 block(256);
+        constexpr int BLOCK_K = 8;
+        sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
+                     /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
+                     /*WARP_M_THREADS*/ 8, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4,
+                     64, false><<<grid, block, 0, stream>>>(out, a, b, m, n, k, alpha, beta);
+    } else {
+        assert(false);
+    }
+}
+
+template <typename scalar_t>
+void sgemm(
+    scalar_t *out,
+    const scalar_t *a,
+    const scalar_t *b,
+    const int m, const int n, const int k,
+    const scalar_t alpha,
+    const scalar_t beta,
+    gpuStream_t stream) {
+    sgemm_<scalar_t, 128, 128>(out, a, b, m, n, k, alpha, beta, stream);
+}
+
+#endif
 
 } // namespace sgemm
