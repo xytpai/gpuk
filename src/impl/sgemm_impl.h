@@ -53,6 +53,17 @@ struct mma_reg_t {
     };
 };
 
+template <uint32_t VEC_BITS = 2, bool ENABLE = true>
+__device__ __forceinline__ uint32_t swizzle(uint32_t addr) {
+    constexpr uint32_t COL_BITS = 7 - 4; // 32*4B (7bits) - 16B (4bits)
+    constexpr uint32_t COL_MASK = ((1 << COL_BITS) - 1) << VEC_BITS;
+    if constexpr (ENABLE) {
+        return ((addr >> VEC_BITS) & COL_MASK) ^ addr;
+    } else {
+        return addr;
+    }
+}
+
 template <
     typename scalar_t,
     int BLOCK_K,
@@ -71,7 +82,7 @@ struct WarpTile {
         mma_reg_t<scalar_t, VEC_M, VEC_N> reg;
 #pragma unroll
         for (int k = 0; k < BLOCK_K; ++k) {
-            reg.a_vec = *reinterpret_cast<a_vec_t *>(&as[k * KSTRIDE_A + th_y]);
+            reg.a_vec = *reinterpret_cast<a_vec_t *>(&as[swizzle(k * KSTRIDE_A + th_y)]);
             reg.b_vec = *reinterpret_cast<b_vec_t *>(&bs[k * KSTRIDE_B + th_x]);
 #pragma unroll
             for (int i = 0; i < VEC_M; ++i) {
@@ -149,7 +160,7 @@ struct BlockTile {
 #pragma unroll
             for (int j = 0; j < LDG_VEC_SIZE; j++) {
                 int x = ldg_a_vec_idx * LDG_VEC_SIZE + j;
-                as[x * BLOCK_M + y] = ldg_a_reg[i].val[j];
+                as[swizzle(x * BLOCK_M + y)] = ldg_a_reg[i].val[j];
             }
         }
 #pragma unroll
