@@ -127,4 +127,14 @@ struct CopyAsync {
     }
 };
 
+template <int N, int CURRENT_VAL = N, int COUNT = 0>
+struct Log2 {
+    enum { VALUE = Log2<N, (CURRENT_VAL >> 1), COUNT + 1>::VALUE };
+};
+
+template <int N, int COUNT>
+struct Log2<N, 0, COUNT> {
+    enum { VALUE = (1 << (COUNT - 1) < N) ? COUNT : COUNT - 1 };
+};
+
 } // namespace kernel_utils

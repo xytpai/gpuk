@@ -94,11 +94,14 @@ template <
     int WARP_M_THREADS,
     int WARP_N_THREADS,
     int VEC_M,
-    int VEC_N>
+    int VEC_N,
+    int WARP_SIZE>
 struct BlockTile {
     enum {
+        WARP_MASK = WARP_SIZE - 1,
+        WARP_SHIFT = Log2<WARP_SIZE>::VALUE,
         LDG_VEC_SIZE = 16 / sizeof(scalar_t),
-        BLOCK_THREADS = BLOCK_M_WARPS * BLOCK_N_WARPS * 32,
+        BLOCK_THREADS = BLOCK_M_WARPS * BLOCK_N_WARPS * WARP_SIZE,
         WARP_ATOM_M = WARP_M_THREADS * VEC_M,
         WARP_ATOM_N = WARP_N_THREADS * VEC_N,
         WARP_M = WARP_M_STEPS * WARP_ATOM_M,
@@ -111,14 +114,18 @@ struct BlockTile {
         LDG_B_X_THREADS = BLOCK_N / LDG_VEC_SIZE,
         LDG_REG_A_COUNT = BLOCK_KM_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
         LDG_REG_B_COUNT = BLOCK_KN_SIZE / LDG_VEC_SIZE / BLOCK_THREADS,
+#ifdef __HIPCC__
+        APAD = 0,
+#elif defined(__CUDACC__)
         APAD = LDG_VEC_SIZE, // swizzle is not a good idea for sgemm
+#endif
     };
-    static_assert(WARP_M_THREADS * WARP_N_THREADS == 32);
+    static_assert(WARP_M_THREADS * WARP_N_THREADS == WARP_SIZE);
     static_assert(LDG_REG_A_COUNT >= 1 && LDG_REG_B_COUNT >= 1);
     using ldg_vec_t = aligned_array<scalar_t, LDG_VEC_SIZE>;
 
     __device__ __forceinline__ BlockTile(int tid) :
-        tid(tid), wid(tid >> 5), w_tid(tid & 31),
+        tid(tid), wid(tid >> WARP_SHIFT), w_tid(tid & WARP_MASK),
         ldg_a_vec_idx(tid % LDG_A_X_THREADS),
         ldg_b_vec_idx(tid % LDG_B_X_THREADS) {
     }
@@ -221,7 +228,9 @@ template <
     int WARP_M_THREADS,
     int WARP_N_THREADS,
     int VEC_M,
-    int VEC_N>
+    int VEC_N,
+    int WARP_SIZE = 32,
+    bool USE_COPY_ASYNC = true>
 __global__ void sgemm_kernel(
     scalar_t *out,
     const scalar_t *a,
@@ -233,17 +242,17 @@ __global__ void sgemm_kernel(
     constexpr int WARP_N = WARP_N_STEPS * WARP_N_THREADS * VEC_N;
     constexpr int BLOCK_M = BLOCK_M_WARPS * WARP_M;
     constexpr int BLOCK_N = BLOCK_N_WARPS * WARP_N;
+    using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
+                                 WARP_M_STEPS, WARP_N_STEPS, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N, WARP_SIZE>;
 
     // get idx
     int tid = threadIdx.x;
-    int wid = tid >> 5;
-    int w_tid = tid & 31;
+    int wid = tid >> BlockTileT::WARP_SHIFT;
+    int w_tid = tid & BlockTileT::WARP_MASK;
     int block_y = blockIdx.y;
     int block_x = blockIdx.z * gridDim.x + blockIdx.x;
 
     // get slm
-    using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS,
-                                 WARP_M_STEPS, WARP_N_STEPS, WARP_M_THREADS, WARP_N_THREADS, VEC_M, VEC_N>;
     constexpr int SLM_SIZE = BLOCK_K * (BLOCK_M + BlockTileT::APAD + BLOCK_N) * 2;
     constexpr int BLOCK_KM_SIZE = BLOCK_K * (BLOCK_M + BlockTileT::APAD);
     constexpr int BLOCK_KN_SIZE = BLOCK_K * BLOCK_N;
@@ -260,26 +269,37 @@ __global__ void sgemm_kernel(
     int b_begin = block_x * BLOCK_N;
     int a_end = block_y * BLOCK_M * k + k;
 
-    block_tile.ldg_copy_async(
-        &as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE],
-        &a[a_begin], k, &b[b_begin], n);
-    block_tile.convert_layout();
-    __syncthreads();
-
-    for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
-        bool has_next = a_begin + BLOCK_K < a_end;
-        if (has_next) {
-            block_tile.ldg_copy_async(
-                &as[next_stage * BLOCK_KM_SIZE], &bs[next_stage * BLOCK_KN_SIZE],
-                &a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
-        }
-        block_tile(o_reg, &as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE]);
-        if (has_next) {
-            block_tile.convert_layout();
-        }
+    if constexpr (USE_COPY_ASYNC) {
+        block_tile.ldg_copy_async(
+            &as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE],
+            &a[a_begin], k, &b[b_begin], n);
+        block_tile.convert_layout();
         __syncthreads();
-        current_stage ^= 1;
-        next_stage ^= 1;
+
+        for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
+            bool has_next = a_begin + BLOCK_K < a_end;
+            if (has_next) {
+                block_tile.ldg_copy_async(
+                    &as[next_stage * BLOCK_KM_SIZE], &bs[next_stage * BLOCK_KN_SIZE],
+                    &a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
+            }
+            block_tile(o_reg, &as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE]);
+            if (has_next) {
+                block_tile.convert_layout();
+            }
+            __syncthreads();
+            current_stage ^= 1;
+            next_stage ^= 1;
+        }
+    } else {
+        for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
+            block_tile.ldg(&a[a_begin], k, &b[b_begin], n);
+            block_tile.sts(&as[current_stage * BLOCK_KM_SIZE], &bs[current_stage * BLOCK_KN_SIZE]);
+            current_stage ^= 1;
+            next_stage ^= 1;
+            __syncthreads();
+            block_tile(o_reg, &as[next_stage * BLOCK_KM_SIZE], &bs[next_stage * BLOCK_KN_SIZE]);
+        }
     }
 
     { // write back
