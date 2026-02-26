@@ -53,14 +53,14 @@ struct mma_reg_t {
     };
 };
 
-template <uint32_t VEC_BITS = 2, bool ENABLE = true>
-__device__ __forceinline__ uint32_t swizzle(uint32_t addr) {
-    constexpr uint32_t COL_BITS = 7 - 4; // 32*4B (7bits) - 16B (4bits)
-    constexpr uint32_t COL_MASK = ((1 << COL_BITS) - 1) << VEC_BITS;
+template <uint32_t VEC_BITS = 2, bool ENABLE = false>
+__device__ __forceinline__ uint32_t swizzle(uint32_t index) {
+    constexpr uint32_t COL_BITS = 3; // 32*4B (7bits) - 16B (4bits)
+    constexpr uint32_t ROW_MASK = ((1 << COL_BITS) - 1) << VEC_BITS;
     if constexpr (ENABLE) {
-        return ((addr >> VEC_BITS) & COL_MASK) ^ addr;
+        return ((index >> COL_BITS) & ROW_MASK) ^ index;
     } else {
-        return addr;
+        return index;
     }
 }
 
@@ -196,7 +196,7 @@ struct BlockTile {
 #pragma unroll
             for (int j = 0; j < LDG_VEC_SIZE; j++) {
                 int x = ldg_a_vec_idx * LDG_VEC_SIZE + j;
-                as_[x * (BLOCK_M + APAD) + y] = ldg_a_reg[i].val[j];
+                as_[swizzle(x * (BLOCK_M + APAD) + y)] = ldg_a_reg[i].val[j];
             }
         }
         CopyAsync::wait();
