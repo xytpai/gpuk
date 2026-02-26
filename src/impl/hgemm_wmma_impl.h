@@ -161,11 +161,15 @@ struct BlockTile {
                 &(reinterpret_cast<ldg_vec_t *>(
                     const_cast<scalar_t *>(b) + ((BLOCK_THREADS * i + tid) / LDG_B_X_THREADS) * b_stride)[ldg_b_vec_idx]));
         }
-        CopyAsync::commit();
     }
 
+    template <int S = 0>
     __device__ __forceinline__ void wait() {
-        CopyAsync::wait();
+        CopyAsync::wait<S>();
+    }
+
+    __device__ __forceinline__ void commit() {
+        CopyAsync::commit();
     }
 
     __device__ __forceinline__ void load_matrix(scalar_t *as, scalar_t *bs) {
@@ -242,7 +246,8 @@ template <
     int BLOCK_M_WARPS,
     int BLOCK_N_WARPS,
     int WARP_M_STEPS,
-    int WARP_N_STEPS>
+    int WARP_N_STEPS,
+    int STAGES = 3>
 __global__ void hgemm_kernel(
     scalar_t *out,
     const scalar_t *a,
@@ -260,34 +265,33 @@ __global__ void hgemm_kernel(
     int block_x = blockIdx.z * gridDim.x + blockIdx.x;
 
     // get slm
-    __shared__ scalar_t as[2][BLOCK_M * BLOCK_K];
-    __shared__ scalar_t bs[2][BLOCK_K * BLOCK_N];
+    __shared__ scalar_t as[STAGES][BLOCK_M * BLOCK_K];
+    __shared__ scalar_t bs[STAGES][BLOCK_K * BLOCK_N];
 
     // init regs
     BlockTileT block_tile(tid);
     int current_stage = 0;
-    int next_stage = 1;
     int a_begin = block_y * BLOCK_M * k;
     int b_begin = block_x * BLOCK_N;
     int a_end = a_begin + k;
 
-    block_tile.ldg_copy_async(as[current_stage], bs[current_stage], &a[a_begin], k, &b[b_begin], n);
-    block_tile.wait();
-    __syncthreads();
-
+#pragma unroll
+    for (int s = 0; s < STAGES; ++s) {
+        block_tile.ldg_copy_async(as[s], bs[s], &a[a_begin + s * BLOCK_K], k, &b[b_begin + s * BLOCK_K * n], n);
+        block_tile.commit();
+    }
     for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
-        bool has_next = (a_begin + BLOCK_K) < a_end;
-        if (has_next) {
-            block_tile.ldg_copy_async(as[next_stage], bs[next_stage], &a[a_begin + BLOCK_K], k, &b[b_begin + BLOCK_K * n], n);
-        }
+        block_tile.template wait<STAGES - 1>();
+        __syncthreads();
         block_tile.load_matrix(as[current_stage], bs[current_stage]);
         block_tile();
-        if (has_next) {
-            block_tile.wait();
-        }
         __syncthreads();
-        current_stage ^= 1;
-        next_stage ^= 1;
+        if (a_begin + STAGES * BLOCK_K < a_end) {
+            block_tile.ldg_copy_async(as[current_stage], bs[current_stage],
+                                      &a[a_begin + STAGES * BLOCK_K], k, &b[b_begin + STAGES * BLOCK_K * n], n);
+        }
+        block_tile.commit();
+        current_stage = (current_stage + 1) % STAGES;
     }
 
     block_tile.store_matrix(out, block_y, block_x, m, n, alpha, beta);
@@ -324,7 +328,7 @@ void hgemm_(
             out, a, b, m, n, k, alpha, beta);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         dim3 block(256);
-        constexpr int BLOCK_K = 32;
+        constexpr int BLOCK_K = 16;
         hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 4,
                      /*WARP_M_STEPS*/ 4, /*WARP_N_STEPS*/ 4><<<grid, block, 0, stream>>>(
             out, a, b, m, n, k, alpha, beta);
