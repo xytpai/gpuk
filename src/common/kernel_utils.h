@@ -110,7 +110,7 @@ struct CopyAsync {
         constexpr int NBYTES = sizeof(T);
         auto dst_ = (uint32_t)(__cvta_generic_to_shared(dst));
         auto src_ = reinterpret_cast<uint64_t>(src);
-        asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n" ::"r"(dst_), "l"(src_), "n"(NBYTES));
+        asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_), "l"(src_), "n"(NBYTES));
 #else
         *dst = *src;
 #endif
@@ -120,9 +120,10 @@ struct CopyAsync {
         asm volatile("cp.async.commit_group;\n" ::);
 #endif
     }
+    template <int S = 0>
     static __device__ __forceinline__ void wait() {
 #ifdef __CUDACC__
-        asm volatile("cp.async.wait_group 0;\n" ::);
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(S));
 #endif
     }
 };
