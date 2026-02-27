@@ -254,15 +254,16 @@ __global__ void hgemm_kernel(
     const scalar_t *b,
     const int m, const int n, const int k,
     const float alpha,
-    const float beta) {
+    const float beta,
+    const int raster_factor) {
     using BlockTileT = BlockTile<scalar_t, BLOCK_K, BLOCK_M_WARPS, BLOCK_N_WARPS, WARP_M_STEPS, WARP_N_STEPS>;
     constexpr int BLOCK_M = BlockTileT::BLOCK_M;
     constexpr int BLOCK_N = BlockTileT::BLOCK_N;
 
     // get idx
     int tid = threadIdx.x;
-    int block_y = blockIdx.y;
-    int block_x = blockIdx.z * gridDim.x + blockIdx.x;
+    int block_y = blockIdx.x / raster_factor;
+    int block_x = blockIdx.x % raster_factor + blockIdx.y * raster_factor;
 
     // get slm
     __shared__ scalar_t as[STAGES][BLOCK_M * BLOCK_K];
@@ -311,28 +312,27 @@ void hgemm_(
     assert(m % VEC_SIZE == 0);
     assert(n % VEC_SIZE == 0);
     assert(k % VEC_SIZE == 0);
-    int m_blocks = (m + BLOCK_M - 1) / BLOCK_M;
-    int n_blocks = (n + BLOCK_N - 1) / BLOCK_N;
-    int split_num = (n_blocks + 32 - 1) / 32;
-    dim3 grid((n_blocks + split_num - 1) / split_num, m_blocks, split_num);
+    auto gr = sgemm::get_grid(m, n, BLOCK_M, BLOCK_N);
+    dim3 grid = std::get<0>(gr);
+    int raster_factor = std::get<1>(gr);
     if constexpr (BLOCK_M == 64 && BLOCK_N == 32) {
         dim3 block(128);
         constexpr int BLOCK_K = 32;
         hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2,
                      /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else if constexpr (BLOCK_M == 64 && BLOCK_N == 64) {
         dim3 block(128);
         constexpr int BLOCK_K = 32;
         hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2,
                      /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         dim3 block(256);
         constexpr int BLOCK_K = 16;
         hgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K, /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 4,
                      /*WARP_M_STEPS*/ 4, /*WARP_N_STEPS*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else {
         assert(false);
     }

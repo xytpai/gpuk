@@ -238,7 +238,8 @@ __global__ void sgemm_kernel(
     const scalar_t *b,
     const int m, const int n, const int k,
     const scalar_t alpha,
-    const scalar_t beta) {
+    const scalar_t beta,
+    const int raster_factor) {
     constexpr int WARP_M = WARP_M_STEPS * WARP_M_THREADS * VEC_M;
     constexpr int WARP_N = WARP_N_STEPS * WARP_N_THREADS * VEC_N;
     constexpr int BLOCK_M = BLOCK_M_WARPS * WARP_M;
@@ -250,8 +251,8 @@ __global__ void sgemm_kernel(
     int tid = threadIdx.x;
     int wid = tid >> BlockTileT::WARP_SHIFT;
     int w_tid = tid & BlockTileT::WARP_MASK;
-    int block_y = blockIdx.y;
-    int block_x = blockIdx.z * gridDim.x + blockIdx.x;
+    int block_y = blockIdx.x / raster_factor;
+    int block_x = blockIdx.x % raster_factor + blockIdx.y * raster_factor;
 
     // get slm
     constexpr int AS_STRIDE = BLOCK_M + BlockTileT::APAD;
@@ -330,6 +331,22 @@ __global__ void sgemm_kernel(
 
 #ifdef __CUDACC__
 
+std::tuple<dim3, int> get_grid(int m, int n, int BLOCK_M, int BLOCK_N) {
+    int bm = (m + BLOCK_M - 1) / BLOCK_M;
+    int bn = (n + BLOCK_N - 1) / BLOCK_N;
+    int raster_factor = 1;
+    if (bn > 5) {
+        raster_factor = 8;
+    } else if (bn > 2) {
+        raster_factor = 4;
+    } else if (bn > 1) {
+        raster_factor = 2;
+    }
+    bm = bm * raster_factor;
+    bn = (bn + raster_factor - 1) / raster_factor;
+    return {dim3(bm, bn, 1), raster_factor};
+}
+
 template <typename scalar_t, int BLOCK_M, int BLOCK_N>
 void sgemm_(
     scalar_t *out,
@@ -343,38 +360,37 @@ void sgemm_(
     assert(m % VEC_SIZE == 0);
     assert(n % VEC_SIZE == 0);
     assert(k % VEC_SIZE == 0);
-    int m_blocks = (m + BLOCK_M - 1) / BLOCK_M;
-    int n_blocks = (n + BLOCK_N - 1) / BLOCK_N;
-    int split_num = (n_blocks + 16 - 1) / 16;
-    dim3 grid((n_blocks + split_num - 1) / split_num, m_blocks, split_num);
+    auto gr = get_grid(m, n, BLOCK_M, BLOCK_N);
+    dim3 grid = std::get<0>(gr);
+    int raster_factor = std::get<1>(gr);
     if constexpr (BLOCK_M == 64 && BLOCK_N == 64) {
         dim3 block(256);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 1, /*WARP_N_STEPS*/ 1,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else if constexpr (BLOCK_M == 32 && BLOCK_N == 64) {
         dim3 block(128);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 1, /*WARP_N_STEPS*/ 1,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else if constexpr (BLOCK_M == 128 && BLOCK_N == 128) {
         dim3 block(256);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 4, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else if constexpr (BLOCK_M == 64 && BLOCK_N == 128) {
         dim3 block(128);
         constexpr int BLOCK_K = 16;
         sgemm_kernel<scalar_t, /*BLOCK_K*/ BLOCK_K,
                      /*BLOCK_M_WARPS*/ 2, /*BLOCK_N_WARPS*/ 2, /*WARP_M_STEPS*/ 2, /*WARP_N_STEPS*/ 2,
                      /*WARP_M_THREADS*/ 4, /*WARP_N_THREADS*/ 8, /*VEC_M*/ 4, /*VEC_N*/ 4><<<grid, block, 0, stream>>>(
-            out, a, b, m, n, k, alpha, beta);
+            out, a, b, m, n, k, alpha, beta, raster_factor);
     } else {
         assert(false);
     }
