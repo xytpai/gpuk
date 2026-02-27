@@ -276,19 +276,20 @@ __global__ void hgemm_kernel(
     int a_end = a_begin + k;
 
 #pragma unroll
-    for (int s = 0; s < STAGES; ++s) {
+    for (int s = 0; s < STAGES - 1; ++s) {
         block_tile.ldg_copy_async(as[s], bs[s], &a[a_begin + s * BLOCK_K], k, &b[b_begin + s * BLOCK_K * n], n);
         block_tile.commit();
     }
     for (; a_begin < a_end; a_begin += BLOCK_K, b_begin += BLOCK_K * n) {
-        block_tile.template wait<STAGES - 1>();
+        block_tile.template wait<STAGES - 2>();
         __syncthreads();
         block_tile.load_matrix(as[current_stage], bs[current_stage]);
         block_tile();
-        __syncthreads();
-        if (a_begin + STAGES * BLOCK_K < a_end) {
-            block_tile.ldg_copy_async(as[current_stage], bs[current_stage],
-                                      &a[a_begin + STAGES * BLOCK_K], k, &b[b_begin + STAGES * BLOCK_K * n], n);
+        if (a_begin + (STAGES - 1) * BLOCK_K < a_end) {
+            int write_stage = (current_stage + STAGES - 1) % STAGES;
+            block_tile.ldg_copy_async(as[write_stage], bs[write_stage],
+                                      &a[a_begin + (STAGES - 1) * BLOCK_K], k,
+                                      &b[b_begin + (STAGES - 1) * BLOCK_K * n], n);
         }
         block_tile.commit();
         current_stage = (current_stage + 1) % STAGES;
